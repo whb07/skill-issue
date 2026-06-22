@@ -1,0 +1,14 @@
+{
+  "name": "rust-skills",
+  "version": "0.1.0",
+  "description": "Opinionated Rust development skills and agents covering coding standards, concurrency, API compatibility, performance-oriented type design, and Criterion.rs benchmarking",
+  "skills": [
+    "./skills/rust-coding-standards",
+    "./skills/rust-concurrency-patterns",
+    "./skills/rust-api-design",
+    "./skills/rust-type-design-performance"
+  ],
+  "agents": [
+    "./agents/rust-benchmark-designer.md"
+  ]
+}
