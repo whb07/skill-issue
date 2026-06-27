@@ -10,6 +10,7 @@ Opinionated Rust equivalents for the .NET skills in `Aaronontheweb/dotnet-skills
 | `skills/rust-concurrency-patterns/SKILL.md` | `rust-concurrency-patterns` | async/await, bounded channels, Rayon, locks, actors, cancellation |
 | `skills/rust-api-design/SKILL.md` | `rust-api-design` | Extend-only APIs, semver, non_exhaustive, sealed traits, wire compatibility, FFI |
 | `skills/rust-type-design-performance/SKILL.md` | `rust-type-design-performance` | Private fields, sealed traits, small newtypes, slices, iterators, dispatch, allocation control |
+| `skills/skill-creator/SKILL.md` | `skill-creator` | Create and update Codex skills with validation scripts, interface metadata, and bundled resources |
 | `agents/rust-benchmark-designer.md` | `rust-benchmark-designer` | Criterion.rs benchmark design, baselines, async benchmarks, profiling, CI strategy |
 
 ## Plugin Manifest Entries
@@ -21,7 +22,8 @@ If adding these to an existing plugin manifest, add:
   "./skills/rust-coding-standards",
   "./skills/rust-concurrency-patterns",
   "./skills/rust-api-design",
-  "./skills/rust-type-design-performance"
+  "./skills/rust-type-design-performance",
+  "./skills/skill-creator"
 ],
 "agents": [
   "./agents/rust-benchmark-designer.md"
