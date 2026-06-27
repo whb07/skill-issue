@@ -1,44 +1,32 @@
 ---
 name: modern-rust-coding-standards
-description: Write modern, high-performance Rust using ownership-first design, enums and pattern matching, Option/Result, newtype value objects, explicit mapping, zero-copy borrowing, and small trait boundaries. Avoid reflection-like magic, global mutable state, and unnecessary cloning.
-invocable: false
+description: Write, refactor, and review idiomatic modern Rust code using ownership-first design, private invariants, typed domain models, enums, Option/Result, explicit error handling, borrowing over cloning, small traits, explicit DTO mapping, async discipline, and measured unsafe. Use when implementing Rust features, translating object-oriented designs into Rust, reviewing Rust code quality, or correcting needless cloning, stringly typed state, panics, weak errors, broad traits, hidden allocation, or blocking async code.
 ---
 
 # Modern Rust Coding Standards
 
-## When to Use This Skill
+## Operating Model
 
-Use this skill when:
+Design Rust code around ownership, invariants, and explicit states. Prefer types that make invalid states unrepresentable, APIs that reveal ownership intent, and errors that callers can handle.
 
-- Writing new Rust code or refactoring existing Rust code
-- Designing domain models, messages, DTOs, or library APIs
-- Translating class-heavy code into idiomatic Rust
-- Reviewing code for needless cloning, weak typing, panics, or async misuse
-- Building code that must be maintainable, testable, and fast without cleverness
+Default stance:
 
----
+1. Model the domain before choosing abstractions.
+2. Keep invariants behind constructors and private fields.
+3. Borrow inputs unless the function must take ownership.
+4. Use enums, newtypes, `Option`, and `Result` instead of strings, booleans, sentinels, null-like values, and panics.
+5. Keep traits small and behavior-focused.
+6. Make conversions explicit and reviewable.
+7. Keep async at I/O boundaries.
+8. Use unsafe only with a written proof, tests, and a reason safe Rust cannot meet.
 
-## Core Principles
-
-1. **Ownership is the design tool** - Model who owns data before writing code.
-2. **Immutability by default** - Use `let`, private fields, and constructors that preserve invariants.
-3. **Types over conventions** - Use newtypes, enums, and `Result` instead of strings, booleans, sentinels, and comments.
-4. **Pattern matching over condition soup** - Make state explicit and exhaustive.
-5. **Borrow before you clone** - Accept `&str`, `&[T]`, `&Path`, and iterators unless ownership is required.
-6. **Explicit errors** - `Result<T, E>` for expected failures, `Option<T>` for absence, `panic!` only for bugs and tests.
-7. **Traits are boundaries, not base classes** - Keep traits small and behavior-focused.
-8. **No magic mapping** - Use `From`, `TryFrom`, explicit functions, and reviewed serde DTOs. Do not hide business mapping behind macro-heavy frameworks.
-9. **Async is for I/O boundaries** - Do not make pure code async. Do not block inside async tasks.
-10. **Unsafe must earn its keep** - Default to safe Rust. Require benchmarks, comments, and tests for every `unsafe` block.
-
----
+Good Rust is usually direct. Avoid clever abstractions that hide ownership, allocation, control flow, or error behavior.
 
 ## Project Defaults
 
-For application crates, prefer this baseline:
+For new application crates, prefer this baseline and adjust only with project-specific reasons:
 
 ```toml
-# Cargo.toml
 [package]
 edition = "2024"
 rust-version = "1.85"
@@ -56,15 +44,19 @@ expect_used = "warn"
 panic = "warn"
 ```
 
-Adjust `missing_docs` and `pedantic` per crate maturity, but do not disable lints casually. If a lint is wrong for the codebase, suppress it locally with a comment explaining why.
+Lint rules:
 
----
+- Keep `cargo fmt` mandatory.
+- Run `cargo clippy --all-targets --all-features` for shared crates when feasible.
+- Suppress lints locally with a reason instead of relaxing crate-wide policy casually.
+- Relax `missing_docs`, `pedantic`, or `nursery` for prototypes or binaries when the noise outweighs the benefit.
+- For library crates, pair coding style with API compatibility review.
 
-## Domain Modeling
+## Domain Types
 
-### Structs for Product Types
+### Structs for Invariants
 
-Use structs for named data with invariants. Keep fields private unless the type is a dumb DTO.
+Use structs for named data with invariants. Keep fields private unless the type is intentionally a plain data carrier.
 
 ```rust
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,11 +67,13 @@ pub struct Customer {
 }
 
 impl Customer {
-    pub fn new(id: CustomerId, email: EmailAddress, name: impl Into<String>) -> Self {
+    pub fn new(id: CustomerId, email: EmailAddress, name: impl Into<String>) -> Result<Self, CustomerError> {
         let name = name.into();
-        assert!(!name.trim().is_empty(), "customer name cannot be empty");
+        if name.trim().is_empty() {
+            return Err(CustomerError::EmptyName);
+        }
 
-        Self { id, email, name }
+        Ok(Self { id, email, name })
     }
 
     pub fn id(&self) -> CustomerId {
@@ -96,16 +90,17 @@ impl Customer {
 }
 ```
 
-**Rules:**
+Struct rules:
 
-- Prefer private fields plus accessors for domain types.
-- Use public fields only for wire DTOs, config structs, and simple data carriers.
-- Do not expose internal collections as mutable references unless mutation is the API.
-- Use `impl Into<String>` at constructors, not everywhere. Internal functions should usually take `&str`.
+- Keep domain fields private.
+- Expose read-only accessors that preserve invariants.
+- Use public fields for DTOs, test fixtures, and simple value aggregates only when literal construction is intended.
+- Do not expose `&mut Vec<T>` or other mutable internals unless mutation is the API.
+- Prefer fallible constructors when input validation can fail.
 
-### Newtypes for Value Objects
+### Newtypes for Values
 
-Primitive obsession is a bug factory. Wrap IDs, email addresses, money, counts, and percentages.
+Wrap IDs, validated text, money, counts, percentages, handles, and other values where raw primitives lose meaning.
 
 ```rust
 use std::{fmt, str::FromStr};
@@ -147,9 +142,11 @@ impl FromStr for OrderId {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmailAddress(String);
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum EmailAddressError {
+    #[error("email is empty")]
     Empty,
+    #[error("email is missing @")]
     MissingAtSign,
 }
 
@@ -161,7 +158,6 @@ impl EmailAddress {
         if trimmed.is_empty() {
             return Err(EmailAddressError::Empty);
         }
-
         if !trimmed.contains('@') {
             return Err(EmailAddressError::MissingAtSign);
         }
@@ -175,19 +171,17 @@ impl EmailAddress {
 }
 ```
 
-**Newtype rules:**
+Newtype rules:
 
-- Derive `Copy` only for small scalar wrappers where copying is semantically cheap.
-- Prefer `parse`, `try_new`, or `TryFrom` for validated values.
-- Prefer `Display` and `FromStr` for text conversions.
-- Avoid `Deref<Target = str>` for domain wrappers; it leaks representation and blurs invariants.
-- Use `#[repr(transparent)]` only when FFI/layout compatibility matters.
+- Derive `Copy` only for small scalar wrappers where duplication is cheap and semantically invisible.
+- Prefer `parse`, `try_new`, `FromStr`, or `TryFrom` for validated values.
+- Implement `Display` for stable text output.
+- Avoid `Deref<Target = str>` for domain wrappers; it leaks representation and weakens invariants.
+- Use `#[repr(transparent)]` only for layout guarantees such as FFI.
 
----
+## Enums and State
 
-## Enums and Pattern Matching
-
-Use enums for closed sets, state machines, commands, and protocol messages. Do not encode state as loose strings.
+Use enums for closed sets, state machines, commands, and protocol messages. Do not encode state as strings, booleans, or nullable field clusters.
 
 ```rust
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -214,26 +208,23 @@ pub fn status_label(status: &OrderStatus) -> &'static str {
 }
 ```
 
-**Pattern matching rules:**
+Enum rules:
 
-- Match on domain states, not on string constants.
-- Prefer exhaustive `match` over `_` in business logic. `_` hides future cases.
-- Use `if let` for one interesting case, `matches!` for predicates, and `let ... else` for guard extraction.
-- Keep enum variants data-rich. A `Paid { receipt_id }` variant is better than `status == Paid` plus a nullable `receipt_id` field.
-
----
+- Prefer exhaustive `match` in domain logic.
+- Avoid `_` when a future variant should force a decision.
+- Use `if let` for one interesting case, `let ... else` for guard extraction, and `matches!` for predicates.
+- Put state-specific data in the variant that owns it.
+- Use `#[non_exhaustive]` only when designing public APIs that must grow without breaking downstream matches.
 
 ## Option, Result, and Panics
 
-Rust has no null. Do not reintroduce it with sentinels.
+Use `Option<T>` for absence and `Result<T, E>` for expected failure.
 
 ```rust
 pub fn find_customer(id: CustomerId, customers: &[Customer]) -> Option<&Customer> {
     customers.iter().find(|customer| customer.id() == id)
 }
 ```
-
-Use `Result` for expected failures:
 
 ```rust
 #[derive(Debug, thiserror::Error)]
@@ -250,27 +241,25 @@ pub fn checkout(cart: &Cart, payment: &PaymentMethod) -> Result<Order, CheckoutE
         return Err(CheckoutError::EmptyCart);
     }
 
-    charge(payment, cart.total())
-        .map_err(|err| CheckoutError::PaymentFailed(err.to_string()))?;
+    charge(payment, cart.total()).map_err(|err| CheckoutError::PaymentFailed(err.to_string()))?;
 
     Ok(Order::from_cart(cart))
 }
 ```
 
-**Error rules:**
+Error rules:
 
-- Library crates expose typed errors. `thiserror` is fine because it does not leak into the public API unless you choose to expose it.
-- Binary crates may use `anyhow` at the top level.
-- Do not return `String` as an error from library APIs.
-- Do not `unwrap()` in production code. Use `?`, typed errors, or explicit recovery.
-- `expect()` is acceptable only when the message proves an invariant: `expect("static regex must compile")`.
-- `panic!` means a bug, impossible state, or test failure. It is not input validation.
-
----
+- Library crates should expose typed errors callers can match or inspect.
+- Binary crates may use `anyhow` at the outer orchestration layer.
+- Do not return `String` or `Box<dyn Error>` from stable library APIs unless type erasure is deliberate.
+- Use `?` and `map_err` to preserve context.
+- Do not `unwrap()` in production paths.
+- Use `expect()` only when the message documents an invariant, such as `expect("static regex must compile")`.
+- Use `panic!` for bugs, impossible states, and tests; not for ordinary input validation.
 
 ## Borrowing and Ownership
 
-### Accept Borrowed Data by Default
+Accept borrowed data by default:
 
 ```rust
 use std::path::Path;
@@ -289,49 +278,37 @@ pub fn total(items: &[OrderItem]) -> Money {
 }
 ```
 
-**Parameter rules:**
+Parameter rules:
 
 | Need | Accept |
 |---|---|
-| Text read-only | `&str` |
-| Bytes read-only | `&[u8]` |
-| Path read-only | `&Path` |
-| Sequence read-only | `&[T]` or `impl IntoIterator<Item = T>` depending on ownership |
-| Maybe owned text | `Cow<'a, str>` |
-| Store for later | `String`, `Vec<T>`, `PathBuf`, or `Arc<T>` |
+| Read text | `&str` |
+| Read bytes | `&[u8]` |
+| Read a path | `&Path` |
+| Read a sequence | `&[T]` |
+| Consume a sequence | `impl IntoIterator<Item = T>` |
+| Maybe borrow or own text | `Cow<'a, str>` |
+| Store for later | `String`, `Vec<T>`, `PathBuf`, `Arc<T>` |
 | Mutate caller data | `&mut T` or `&mut [T]` |
 
-### Clone Deliberately
+Clone rules:
 
-```rust
-// BAD: clone to satisfy the borrow checker without understanding ownership.
-let email = customer.email().clone();
-send_email(email.as_str());
-
-// GOOD: borrow the value.
-send_email(customer.email().as_str());
-```
-
-If a clone is intentional, make it visible:
+- Do not clone to appease the borrow checker before understanding ownership.
+- Prefer accessors that return borrowed views: `&str`, `&[T]`, `&Path`, `Option<&T>`.
+- Make intentional clones visible with a variable name or short comment when the cost or reason is non-obvious.
+- Use `Arc<T>` for shared ownership across tasks or threads; do not use it to avoid designing ownership.
 
 ```rust
 let snapshot = current_state.clone(); // intentional: audit task needs an immutable snapshot
 ```
 
----
-
 ## Traits and Composition
 
-Traits are not base classes. They define a narrow capability.
+Traits define capabilities, not inheritance trees.
 
 ```rust
 pub trait Clock {
     fn now(&self) -> time::OffsetDateTime;
-}
-
-pub trait OrderRepository {
-    fn get(&self, id: OrderId) -> impl Future<Output = Result<Option<Order>, RepositoryError>> + Send;
-    fn save(&self, order: Order) -> impl Future<Output = Result<(), RepositoryError>> + Send;
 }
 ```
 
@@ -348,20 +325,20 @@ pub fn complete_order(sender: &impl SendReceipt, order: Order) -> Result<Order, 
 }
 ```
 
-**Trait rules:**
+Trait rules:
 
-- Keep traits small. One to three methods is usually enough.
-- Do not create a trait just because a type exists. Create a trait when multiple implementations or test seams are real.
-- Prefer generics (`T: Trait`) for hot paths and static dispatch.
-- Prefer `dyn Trait` at application boundaries where plugin-like behavior is needed.
-- Avoid `async_trait` in hot paths; it boxes futures. Use native `async fn` in traits or explicit associated future types when performance matters.
-- Do not build inheritance trees with traits. Compose capabilities.
+- Create a trait when multiple implementations, a boundary, or a test substitute is real.
+- Keep traits small; one to three methods is often enough.
+- Prefer inherent methods for behavior on types you own.
+- Prefer generics (`T: Trait`) in hot paths and `dyn Trait` at runtime boundaries.
+- Avoid blanket impls unless coherence and downstream conflicts have been reviewed.
+- Avoid `async_trait` in hot paths because it usually boxes futures.
+- Use native `async fn` in traits or associated future types when performance and allocation matter.
+- Do not build broad repository or service base classes with traits.
 
----
+## Explicit Mapping
 
-## Explicit Mapping, No Magic
-
-Rust does not have runtime reflection in the C# sense. Do not replace it with unreviewable macro mapping.
+Keep domain types separate from wire, storage, and UI DTOs. Map explicitly.
 
 ```rust
 #[derive(Debug, serde::Serialize)]
@@ -384,7 +361,7 @@ impl From<&Order> for OrderDto {
 }
 ```
 
-Inbound mappings should be fallible:
+Inbound mapping should be fallible:
 
 ```rust
 #[derive(Debug, serde::Deserialize)]
@@ -409,19 +386,17 @@ impl TryFrom<CreateOrderRequest> for CreateOrderCommand {
 }
 ```
 
-**Mapping rules:**
+Mapping rules:
 
-- Use separate DTOs for wire shape and domain types.
 - Use `From` only for infallible conversions.
 - Use `TryFrom` for validation, parsing, and domain construction.
-- Do not use broad derive macros that silently copy fields across domain boundaries.
-- Avoid serializing domain objects directly unless the domain type is explicitly a wire type.
+- Do not serialize domain objects directly unless the domain type is explicitly a wire type.
+- Avoid macro-heavy field mapping across domain boundaries.
+- Keep serde attributes on DTOs, not core domain types, unless serialization is the domain purpose.
 
----
+## Async Discipline
 
-## Async Coding Standards
-
-Async Rust is cooperative. Blocking inside it harms the whole runtime.
+Async Rust is cooperative. Keep async at I/O and scheduling boundaries.
 
 ```rust
 pub async fn load_dashboard(
@@ -438,16 +413,29 @@ pub async fn load_dashboard(
 }
 ```
 
-**Async rules:**
+Async rules:
 
 - Do not make pure CPU functions async.
 - Do not call `std::thread::sleep`, blocking file I/O, or blocking database clients inside async tasks.
 - Use `tokio::task::spawn_blocking` for unavoidable blocking work.
-- Do not hold a `MutexGuard` across `.await`.
+- Do not hold `MutexGuard`, `RefCell` borrows, or other synchronous guards across `.await`.
 - Prefer bounded channels for background work.
-- Always decide how tasks shut down. Dropped handles and immortal tasks are bugs.
+- Decide how every spawned task shuts down.
+- Propagate cancellation intentionally; dropped handles and immortal tasks are bugs.
 
----
+## Unsafe
+
+Default to safe Rust.
+
+Require all of the following before accepting `unsafe`:
+
+- A clear reason safe Rust is insufficient.
+- A safety comment explaining the invariants the block relies on.
+- Tests that exercise boundary conditions.
+- Fuzzing, Miri, sanitizers, or benchmarks when the risk justifies it.
+- A narrow unsafe surface wrapped by a safe API.
+
+Do not use unsafe to bypass ownership, lifetime, or concurrency design problems.
 
 ## Code Organization
 
@@ -457,17 +445,16 @@ Prefer domain-first modules with explicit public surfaces.
 src/
   lib.rs
   orders/
-    mod.rs          # public exports for the orders module
-    order.rs        # primary aggregate
-    order_id.rs     # value object
-    status.rs       # enum state
-    commands.rs     # command types
-    errors.rs       # typed errors
-    dto.rs          # wire/API DTOs if needed
+    mod.rs
+    order.rs
+    order_id.rs
+    status.rs
+    commands.rs
+    errors.rs
+    dto.rs
 ```
 
 ```rust
-// src/orders/mod.rs
 mod commands;
 mod errors;
 mod order;
@@ -481,14 +468,12 @@ pub use order_id::OrderId;
 pub use status::OrderStatus;
 ```
 
-**Module rules:**
+Module rules:
 
 - Keep implementation details private by default.
 - Re-export only the intended API from `mod.rs` or `lib.rs`.
-- Do not expose internal module paths as part of public API accidentally.
-- Use integration tests for public API behavior and unit tests for private invariants.
-
----
+- Avoid exposing internal module paths accidentally.
+- Use integration tests for public behavior and unit tests for private invariants.
 
 ## Testing Standards
 
@@ -504,127 +489,92 @@ mod tests {
     }
 
     #[test]
-    fn normalizes_valid_email() {
-        let email = EmailAddress::parse("  USER@example.com  ").unwrap();
+    fn accepts_valid_email() {
+        let email = EmailAddress::parse("USER@example.com").unwrap();
         assert_eq!(email.as_str(), "USER@example.com");
     }
 }
 ```
 
-**Testing rules:**
+Testing rules:
 
 - Tests may use `unwrap()` when failure should fail the test immediately.
 - Prefer table-driven tests for business rules.
 - Use `proptest` for parsers, serialization, and value objects with invariants.
-- Use `insta` snapshots for stable textual outputs, not for complex domain behavior.
-- Test public behavior, not private implementation details.
+- Use `insta` snapshots for stable textual output, not for complex domain behavior.
+- Test public behavior more than private implementation details.
+- Add regression tests before fixing subtle ownership, parsing, serialization, or concurrency bugs.
 
----
+## Review Checklist
 
-## Anti-Patterns
+Use this checklist for Rust implementation and refactor reviews:
+
+- [ ] Domain states are represented with types, not strings, booleans, or nullable clusters.
+- [ ] Constructors preserve invariants and are fallible when input can be invalid.
+- [ ] Domain fields are private unless public literal construction is intentional.
+- [ ] Absence uses `Option`; expected failure uses typed `Result`.
+- [ ] `unwrap`, `expect`, and `panic` are absent from production paths or justified by invariants.
+- [ ] Function parameters borrow by default and take ownership only when needed.
+- [ ] Clones are necessary, cheap, or deliberately documented.
+- [ ] Traits are small, capability-focused, and justified by a real boundary.
+- [ ] DTO mapping is explicit and fallible where validation is required.
+- [ ] Async code avoids blocking calls and synchronous guards across `.await`.
+- [ ] Unsafe code has a safety comment, tests, and a narrow safe wrapper.
+- [ ] `cargo fmt`, `cargo clippy`, and relevant tests have been run.
+
+## Common Anti-Patterns
+
+### Stringly Typed State
 
 ```rust
-// DON'T: stringly typed state.
 pub struct Order {
     pub status: String,
 }
-
-// DO: typed state.
-pub enum OrderStatus {
-    Draft,
-    Submitted,
-    Paid,
-}
 ```
 
+Use an enum instead.
+
+### Nullable State Clusters
+
 ```rust
-// DON'T: optional fields that only make sense in certain states.
 pub struct Order {
     pub status: OrderStatus,
     pub receipt_id: Option<String>,
     pub cancel_reason: Option<String>,
 }
-
-// DO: state carries its own data.
-pub enum OrderStatus {
-    Paid { receipt_id: String },
-    Cancelled { reason: String },
-}
 ```
 
+Put state-specific data on enum variants.
+
+### Panics for Input Failure
+
 ```rust
-// DON'T: panic for expected input failure.
 pub fn parse_quantity(value: &str) -> Quantity {
     Quantity(value.parse().unwrap())
 }
-
-// DO: return a typed error.
-pub fn parse_quantity(value: &str) -> Result<Quantity, ParseQuantityError> {
-    let parsed = value.parse()?;
-    Quantity::try_new(parsed)
-}
 ```
 
+Return a typed error.
+
+### Habitual Cloning
+
 ```rust
-// DON'T: clone as a habit.
 fn render(user: User) -> String {
     format!("{}", user.name.clone())
 }
-
-// DO: borrow.
-fn render(user: &User) -> String {
-    user.name().to_owned()
-}
 ```
 
+Borrow instead.
+
+### Broad Base Traits
+
 ```rust
-// DON'T: massive trait as a fake repository base class.
 pub trait Repository {
     fn get_order(&self, id: OrderId) -> Result<Order, Error>;
     fn save_order(&self, order: Order) -> Result<(), Error>;
     fn get_customer(&self, id: CustomerId) -> Result<Customer, Error>;
     fn save_customer(&self, customer: Customer) -> Result<(), Error>;
 }
-
-// DO: small traits per consumer.
-pub trait LoadOrder {
-    fn load_order(&self, id: OrderId) -> Result<Option<Order>, Error>;
-}
 ```
 
----
-
-## Best Practices Summary
-
-### DO
-
-- Use structs with private fields for domain types.
-- Use newtypes for IDs, validated text, quantities, and money.
-- Use enums for state and protocol variants.
-- Use `Option` for absence and `Result` for expected failure.
-- Use `match`, `if let`, `let ... else`, and `matches!` instead of flags and casts.
-- Accept borrowed inputs by default: `&str`, `&[T]`, `&Path`.
-- Return owned values when transferring ownership across API boundaries.
-- Use `From` and `TryFrom` for explicit mapping.
-- Keep traits small and local to the consumer.
-- Run `cargo fmt`, `cargo clippy`, and tests before review.
-
-### DON'T
-
-- Do not encode state as strings or nullable field clusters.
-- Do not use `unwrap`, `expect`, or `panic` for ordinary input failures.
-- Do not expose mutable collections from public APIs.
-- Do not clone to appease the compiler without understanding ownership.
-- Do not use macro-heavy mapping to hide business conversions.
-- Do not create traits for every struct.
-- Do not block inside async code.
-- Do not use `unsafe` for convenience.
-
----
-
-## Additional Resources
-
-- The Rust Book: https://doc.rust-lang.org/book/
-- Rust API Guidelines: https://rust-lang.github.io/api-guidelines/
-- Error Handling in Rust: https://doc.rust-lang.org/book/ch09-00-error-handling.html
-- Clippy: https://doc.rust-lang.org/clippy/
+Use small traits per consumer.
