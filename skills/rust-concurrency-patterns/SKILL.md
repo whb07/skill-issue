@@ -1,84 +1,57 @@
 ---
 name: rust-concurrency-patterns
-description: "Choose the right Rust concurrency abstraction: ordinary async/await for I/O, bounded channels for producer/consumer, Rayon for CPU parallelism, locks only for short critical sections, and actors/tasks for isolated state machines. Avoid Arc<Mutex<T>> business logic and unbounded queues by default."
-invocable: false
+description: Choose and review Rust concurrency designs using sequential code, async/await, Tokio tasks, bounded channels, cancellation, locks, Rayon, atomics, and actor-style state ownership. Use when deciding how work should run concurrently, fixing shared mutex business logic, bounding task fan-out, designing producer/consumer pipelines, preventing blocking in async code, handling shutdown, or choosing between channels, locks, actors, Rayon, and async streams.
 ---
 
-# Rust Concurrency: Choosing the Right Tool
+# Rust Concurrency Patterns
 
-## When to Use This Skill
+## Operating Model
 
-Use this skill when:
+Start with no concurrency. Add it only when there is a measured performance need, an I/O concurrency need, or a real architectural boundary.
 
-- Deciding how to run work concurrently in Rust
-- Choosing between async/await, Tokio tasks, channels, locks, Rayon, and actors
-- Reviewing code that uses `Arc<Mutex<T>>`, unbounded channels, or detached tasks
-- Building producer/consumer pipelines with backpressure
-- Managing shared state, state machines, or long-lived entities
-- Mixing synchronous CPU work with async I/O
+Rust prevents data races; it does not prevent poor concurrency architecture. Most production bugs come from unbounded queues, detached tasks, missing shutdown, hidden blocking, long-held locks, unclear ownership, and shared mutable domain state.
 
----
+Default escalation order:
 
-## The Philosophy
+1. Sequential code.
+2. `async`/`await` for I/O concurrency.
+3. `join!`, `try_join!`, `JoinSet`, `FuturesUnordered`, or `buffer_unordered(n)` for multiple async operations.
+4. Bounded channels for producer/consumer work and backpressure.
+5. Rayon or explicit worker pools for CPU-bound parallelism.
+6. Actor-style tasks when one task should own state and process commands serially.
+7. Locks for small, boring, short critical sections.
 
-**Start with no concurrency. Add it only when there is measured or architectural need.**
+Locks are fine for caches, counters, and short in-memory updates. Do not use `Arc<Mutex<DomainState>>` as the business workflow engine.
 
-Rust makes data races hard, but it does not make bad concurrency designs good. Most bugs come from unclear ownership, unbounded queues, missing shutdown, hidden blocking, and shared mutable state.
+## Decision Guide
 
-**Escalation order:**
+| Need | Prefer | Avoid |
+|---|---|---|
+| One I/O operation | Plain `async`/`await` | Spawning a task for no reason |
+| Fixed independent async calls | `tokio::join!` or `tokio::try_join!` | Manual task plumbing |
+| Many async jobs | `buffer_unordered(n)`, `JoinSet`, `FuturesUnordered` | Unbounded `tokio::spawn` loops |
+| CPU-heavy parallel work | Rayon | Running CPU loops on async runtime workers |
+| Blocking API from async code | `tokio::task::spawn_blocking` | Calling blocking code directly |
+| Producer/consumer queue | Bounded `mpsc` | Unbounded channels by habit |
+| One request/response reply | `oneshot` | Shared mutable response slots |
+| Latest value for many tasks | `watch` | Polling a locked value |
+| Event fan-out | `broadcast` | Pretending every receiver sees every event |
+| Small shared cache | `Mutex` or `RwLock` | Holding locks across `.await` |
+| Shared counter or flag | Atomics | Locking hot counters |
+| Serialized state machine | Actor task plus bounded mailbox | `Arc<Mutex<State>>` exposed to callers |
 
-1. Plain sequential code
-2. `async`/`await` for I/O concurrency
-3. `tokio::join!`, `try_join!`, `JoinSet`, or `FuturesUnordered` for multiple async operations
-4. Bounded channels for producer/consumer and serialized state access
-5. Rayon or worker pools for CPU-bound parallelism
-6. Actors when a task owns state and receives commands over a channel
-7. Locks only for small, boring, short critical sections
+Ask these questions before choosing:
 
-**Locks are not evil. Locks as architecture are evil.** Use locks for caches, counters, and short in-memory updates. Do not use `Arc<Mutex<DomainState>>` as your business workflow engine.
+1. Is the work I/O-bound, CPU-bound, or state-serialization-bound?
+2. Who owns the data?
+3. What bounds memory growth?
+4. How are errors observed?
+5. How does shutdown happen?
+6. What happens on cancellation?
 
----
+## Async I/O
 
-## Decision Tree
-
-```text
-What are you trying to do?
-│
-├─► Wait for I/O: HTTP, DB, socket, timer?
-│   └─► Use async/await with Tokio or the runtime already in the project
-│
-├─► Run a fixed set of independent async calls?
-│   └─► Use tokio::join! or tokio::try_join!
-│
-├─► Run many async jobs with bounded concurrency?
-│   └─► Use JoinSet, FuturesUnordered, or stream.buffer_unordered(n)
-│
-├─► Process CPU-heavy data in parallel?
-│   └─► Use Rayon, or spawn_blocking when called from async code
-│
-├─► Producer/consumer work queue?
-│   └─► Use a bounded channel: tokio::sync::mpsc or crossbeam_channel
-│
-├─► Share small in-memory state?
-│   ├─► Sync code only: std::sync::Mutex / RwLock or parking_lot
-│   └─► Async code and guard crosses await: redesign; if unavoidable, tokio::sync::Mutex
-│
-├─► Stateful entity or workflow with serialized commands?
-│   └─► Use an actor: one task owns state; callers send messages
-│
-├─► Broadcast latest value to many tasks?
-│   ├─► Latest state: tokio::sync::watch
-│   └─► Event fan-out: tokio::sync::broadcast
-│
-└─► Need distributed actors / supervision / clustering?
-    └─► Consider a dedicated actor framework; do not hand-roll distributed systems casually
-```
-
----
-
-## Level 1: Plain Async/Await
-
-**Use for:** I/O-bound operations, timers, network calls, database calls, and ordinary service code.
+Use async for I/O-bound operations, timers, network calls, database calls, and ordinary service orchestration.
 
 ```rust
 pub async fn get_order_summary(
@@ -93,7 +66,7 @@ pub async fn get_order_summary(
 }
 ```
 
-Run independent calls together:
+Run independent calls together without spawning:
 
 ```rust
 pub async fn load_dashboard(
@@ -112,19 +85,17 @@ pub async fn load_dashboard(
 }
 ```
 
-**Rules:**
+Async rules:
 
-- Do not block inside async code.
-- Do not use async for pure CPU functions.
-- Prefer `try_join!` when any failure should fail the whole operation.
-- Prefer `join!` when all results should be collected regardless of individual failure.
-- Make cancellation behavior explicit. Dropping a future cancels it; dropping a Tokio `JoinHandle` detaches it.
+- Use `try_join!` when any failure should fail the combined operation.
+- Use `join!` when every result should be collected.
+- Do not make pure CPU functions async.
+- Do not block runtime worker threads with `std::thread::sleep`, blocking file I/O, blocking database clients, or long CPU loops.
+- Know cancellation semantics: dropping a future cancels it; dropping a Tokio `JoinHandle` detaches the task.
 
----
+## Many Async Jobs
 
-## Level 2: Many Async Tasks with Bounded Concurrency
-
-**Use for:** calling many services, fetching many URLs, or processing many jobs concurrently without overwhelming dependencies.
+Bound fan-out when processing many async jobs.
 
 ```rust
 use futures::{stream, StreamExt, TryStreamExt};
@@ -141,7 +112,7 @@ pub async fn fetch_all(
 }
 ```
 
-For owned spawned tasks, use `JoinSet` and always drain it:
+Use `JoinSet` for owned spawned tasks and drain every result:
 
 ```rust
 use tokio::task::JoinSet;
@@ -161,28 +132,24 @@ pub async fn process_jobs(jobs: Vec<Job>) -> Result<(), JobError> {
 }
 ```
 
-**Rules:**
+Task rules:
 
-- Bound concurrency. `for item in items { tokio::spawn(...) }` without a limit is a production incident waiting to happen.
-- Always observe task results. A failed detached task is a silent bug.
-- Keep task inputs owned or `Arc`-backed. Do not spawn tasks that borrow stack data unless scoped APIs guarantee lifetime safety.
+- Set an explicit concurrency limit.
+- Observe every task result.
+- Prefer structured concurrency: keep handles in scope and await them.
+- Move owned values or `Arc` handles into spawned tasks.
+- Do not spawn tasks that borrow stack data unless a scoped API guarantees safety.
+- Decide whether partial failure cancels remaining work or lets it drain.
 
----
+## CPU-Bound Work
 
-## Level 3: CPU-Bound Parallelism
-
-**Use for:** CPU-heavy loops, parsing, compression, image processing, crypto, scoring, and batch transformations.
-
-Use Rayon in synchronous CPU code:
+Use Rayon for CPU-heavy loops, parsing, compression, image processing, crypto, scoring, and batch transformations.
 
 ```rust
 use rayon::prelude::*;
 
 pub fn score_orders(orders: &[Order]) -> Vec<OrderScore> {
-    orders
-        .par_iter()
-        .map(score_order)
-        .collect()
+    orders.par_iter().map(score_order).collect()
 }
 ```
 
@@ -196,20 +163,17 @@ pub async fn parse_large_file(bytes: Vec<u8>) -> Result<ParsedFile, ParseError> 
 }
 ```
 
-**Rules:**
+CPU rules:
 
 - Async runtimes are not CPU work schedulers.
 - Use `spawn_blocking` for unavoidable blocking calls from async code.
-- Use Rayon for data parallelism outside async request paths.
-- Do not mix Rayon and Tokio casually in hot paths; measure and document the boundary.
+- Use Rayon for data parallelism outside latency-sensitive async request paths.
+- Avoid mixing Rayon and Tokio in hot paths without measuring.
+- Bound CPU parallelism when work competes with request handling.
 
----
+## Channels and Backpressure
 
-## Level 4: Channels for Producer/Consumer
-
-**Use for:** work queues, decoupling producers from consumers, serialized processing, fan-in, and backpressure.
-
-Prefer bounded channels:
+Use channels for work queues, decoupling producers from consumers, serialized processing, fan-in, and backpressure. Prefer bounded channels.
 
 ```rust
 use tokio::sync::mpsc;
@@ -225,10 +189,7 @@ impl OrderQueue {
     }
 
     pub async fn submit(&self, command: OrderCommand) -> Result<(), QueueClosed> {
-        self.sender
-            .send(command)
-            .await
-            .map_err(|_| QueueClosed)
+        self.sender.send(command).await.map_err(|_| QueueClosed)
     }
 }
 
@@ -241,30 +202,30 @@ pub async fn run_order_worker(mut receiver: mpsc::Receiver<OrderCommand>) {
 }
 ```
 
-**Channel selection:**
+Channel selection:
 
 | Need | Tool |
 |---|---|
 | Async MPSC work queue | `tokio::sync::mpsc::channel` |
-| Sync MPMC work queue | `crossbeam_channel` or `std::sync::mpsc` for simple cases |
+| Sync MPMC work queue | `crossbeam_channel` |
+| Simple sync one-producer queue | `std::sync::mpsc` |
 | One response from one task | `tokio::sync::oneshot` |
 | Latest value observed by many tasks | `tokio::sync::watch` |
-| Broadcast events to many subscribers | `tokio::sync::broadcast` |
-| Sync/async bridge | Tokio `blocking_send`, `blocking_recv`, or a dedicated bridge task |
+| Event fan-out | `tokio::sync::broadcast` |
+| Sync/async bridge | Tokio `blocking_send`, `blocking_recv`, or a bridge task |
 
-**Rules:**
+Channel rules:
 
-- Bounded by default. Backpressure is a feature.
-- Unbounded channels require a written reason and a shutdown story.
-- Message types should be domain commands, not anonymous tuples.
-- Include response channels for request/response actors.
-- Define close behavior: who drops the sender, who drains the receiver, and how shutdown is signaled.
+- Use bounded channels by default; backpressure is a feature.
+- Require a written reason for unbounded channels.
+- Make messages domain commands or events, not anonymous tuples.
+- Include response channels for request/response interactions.
+- Define close behavior: who drops senders, who drains receivers, and which messages may be lost.
+- Treat send failure as a shutdown signal unless there is a stronger domain meaning.
 
----
+## Locks and Shared State
 
-## Level 5: Locks for Short Critical Sections
-
-**Use for:** small shared state, caches, counters, dedup maps, and state that is cheap to update in memory.
+Use locks for small shared state, caches, counters, dedup maps, and cheap in-memory updates.
 
 ```rust
 use std::{collections::HashMap, sync::Mutex};
@@ -286,18 +247,9 @@ impl CustomerCache {
 }
 ```
 
-In async code, avoid holding locks across `.await`:
+Avoid holding locks across `.await`:
 
 ```rust
-// BAD: lock guard lives across .await.
-async fn update_bad(state: Arc<tokio::sync::Mutex<State>>, client: Client) -> Result<(), Error> {
-    let mut state = state.lock().await;
-    let remote = client.fetch().await?;
-    state.apply(remote);
-    Ok(())
-}
-
-// GOOD: await first, lock briefly.
 async fn update_good(state: Arc<tokio::sync::Mutex<State>>, client: Client) -> Result<(), Error> {
     let remote = client.fetch().await?;
 
@@ -308,30 +260,30 @@ async fn update_good(state: Arc<tokio::sync::Mutex<State>>, client: Client) -> R
 }
 ```
 
-**Mutex choice:**
+Mutex choice:
 
 | Context | Prefer |
 |---|---|
 | Sync code | `std::sync::Mutex` or `parking_lot::Mutex` |
 | Async code, no await while locked | Often `std::sync::Mutex` is fine |
-| Async code, guard must wait asynchronously | `tokio::sync::Mutex`, but redesign first |
-| Many reads, few writes | `RwLock`, but measure; it can starve or add overhead |
-| Atomic counter/flag | `AtomicU64`, `AtomicBool`, etc. |
+| Async code, asynchronous waiting for lock is required | `tokio::sync::Mutex`, but reconsider design first |
+| Many reads, few writes | `RwLock`, after considering starvation and overhead |
+| Hot counter or flag | Atomics |
 
-**Rules:**
+Lock rules:
 
-- Lock only the data, not the world.
+- Lock only the data needed for the operation.
+- Put fields behind one lock when they are usually accessed together; avoid multiple wrappers that force repeated locking.
 - Keep critical sections tiny and non-async.
-- Do not call user-provided callbacks while holding a lock.
-- Never use a lock to paper over unclear ownership.
+- Do not call user callbacks while holding a lock.
+- Do not perform I/O while holding a lock.
+- Use poisoning intentionally: recover, clear, or fail loudly.
+- Treat `parking_lot` as an option to measure, not an automatic upgrade over standard-library locks.
+- Do not use locks to avoid designing ownership.
 
----
+## Actors and State Ownership
 
-## Level 6: Actors and State Ownership
-
-**Use for:** long-lived state machines, entity-per-task state, serialized command handling, workflows, supervision, and command/query interactions.
-
-A minimal actor is just a task that owns state and receives messages:
+Use an actor-style task for long-lived state machines, entity-per-task state, serialized command handling, workflows, timers, retries, and command/query interactions.
 
 ```rust
 use tokio::sync::{mpsc, oneshot};
@@ -380,36 +332,24 @@ impl CartActor {
 }
 ```
 
-**Actor rules:**
+Actor rules:
 
-- The actor owns its state. Callers do not get `Arc<Mutex<State>>` access.
-- Messages are explicit domain commands.
-- Bounded mailbox by default.
-- Every request expecting a response carries a `oneshot::Sender`.
-- Supervision is a design requirement. Decide what happens when the actor fails.
-- Do not build a distributed actor runtime unless that is your product.
+- The actor owns its state; callers do not get `Arc<Mutex<State>>` access.
+- Use explicit domain commands.
+- Use a bounded mailbox by default.
+- Put `oneshot::Sender` in messages that expect replies.
+- Decide what happens when the actor fails, exits, or falls behind.
+- Store or supervise actor task handles when failure matters.
+- Do not build a distributed actor runtime unless that is the product.
 
-**When actors are worth it:**
-
-- State transitions are complex and must be serialized.
-- Each entity can be isolated independently.
-- You need clear command ordering.
-- You need a place to put timers, retries, and workflow state.
-
-**When actors are overkill:**
-
-- Stateless request/response services.
-- Simple CRUD.
-- Pure data transformations.
-- A single cache protected by a short lock.
-
----
+Actors are useful when state transitions are complex, command ordering matters, timers/retries belong with state, or each entity can be isolated independently. They are overkill for stateless request/response code, simple CRUD, pure transformations, or a single cache.
 
 ## Cancellation and Shutdown
 
-Concurrency without shutdown is a leak.
+Every long-running task needs a shutdown path.
 
 ```rust
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 pub async fn run_worker(
@@ -430,108 +370,92 @@ pub async fn run_worker(
 }
 ```
 
-**Shutdown rules:**
+Shutdown rules:
 
 - Store `JoinHandle`s for long-running tasks.
-- Signal shutdown explicitly with channel close or `CancellationToken`.
-- Drain queues when correctness requires it; drop queues when latency matters more.
+- Signal shutdown explicitly with channel close, a command message, or `CancellationToken`.
+- Drain queues when correctness matters; drop queues when latency matters more.
 - Use `JoinHandle::abort` only when abrupt cancellation is safe.
 - Log task exits and errors.
+- Test shutdown paths for workers, actors, and queues.
 
----
+## Atomics
 
-## Anti-Patterns
+Use atomics for small independent counters, flags, and sequence numbers.
 
-### Arc<Mutex<T>> as Business Architecture
+Atomic rules:
+
+- Prefer locks when multiple fields must change together.
+- Keep memory ordering simple; use `Relaxed` only when ordering truly does not matter.
+- Use `SeqCst` when correctness is more important than squeezing performance and the ordering model is not obvious.
+- Do not build complex lock-free data structures unless that is the point of the code and tests prove it.
+
+## Review Checklist
+
+Use this checklist for concurrency design and PR review:
+
+- [ ] Concurrency is necessary and its purpose is clear.
+- [ ] Work is classified correctly as I/O-bound, CPU-bound, or state-serialization-bound.
+- [ ] Fan-out and queues are bounded unless explicitly justified.
+- [ ] Task results are observed.
+- [ ] Long-running tasks have shutdown and cancellation paths.
+- [ ] CPU or blocking work stays off async runtime workers.
+- [ ] Locks guard small data and are not held across `.await`, I/O, or callbacks.
+- [ ] Shared mutable domain state is isolated behind an owner task or narrow lock.
+- [ ] Channel messages are explicit domain types.
+- [ ] Actor mailboxes are bounded and actor failure behavior is defined.
+- [ ] Backpressure, overload, and dropped-message behavior are documented.
+- [ ] Tests cover shutdown, cancellation, and error propagation where behavior is important.
+
+## Common Anti-Patterns
+
+### `Arc<Mutex<T>>` as Business Architecture
 
 ```rust
-// BAD: every workflow step contends on shared mutable domain state.
 type SharedOrders = Arc<tokio::sync::Mutex<HashMap<OrderId, Order>>>;
-
-// GOOD: one task owns order state, callers send commands.
 ```
+
+Prefer one owner task with domain commands when workflows and state transitions matter.
 
 ### Unbounded Channels by Habit
 
 ```rust
-// BAD: no backpressure; memory is the queue.
 let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-
-// GOOD: bounded mailbox with explicit capacity.
-let (tx, rx) = tokio::sync::mpsc::channel(1024);
 ```
+
+Prefer a bounded mailbox with an explicit capacity.
 
 ### Blocking Inside Async
 
 ```rust
-// BAD: blocks runtime worker thread.
 async fn wait_bad() {
     std::thread::sleep(std::time::Duration::from_secs(1));
 }
-
-// GOOD: yields to runtime.
-async fn wait_good() {
-    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-}
 ```
+
+Use runtime-aware async operations such as `tokio::time::sleep`.
 
 ### Spawn and Forget
 
 ```rust
-// BAD: no error observation, no shutdown.
 tokio::spawn(async move {
     process_forever().await;
 });
-
-// GOOD: store handle, signal shutdown, observe result.
-let handle = tokio::spawn(async move { process_forever(shutdown).await });
 ```
+
+Store the handle, signal shutdown, and observe the result when failure matters.
 
 ### Holding Locks Across Await
 
 ```rust
-// BAD: lock held while the task waits for remote I/O.
 let mut guard = state.lock().await;
 let value = client.fetch().await?;
 guard.update(value);
 ```
 
----
+Await first, then lock briefly.
 
-## Quick Reference
-
-| Need | Tool | Notes |
-|---|---|---|
-| Single I/O operation | `async`/`await` | Default async style |
-| Fixed independent async operations | `tokio::join!`, `tokio::try_join!` | No task spawning required |
-| Many async operations | `JoinSet`, `FuturesUnordered`, `buffer_unordered(n)` | Bound concurrency |
-| CPU-bound parallel loops | Rayon | Keep out of async scheduler |
-| Blocking from async | `spawn_blocking` | Boundary only, not everywhere |
-| Work queue | Bounded `mpsc` | Backpressure by default |
-| One-shot response | `oneshot` | Great for actor replies |
-| Latest shared value | `watch` | Subscribers see newest value |
-| Event fan-out | `broadcast` | Lagging receivers can miss messages |
-| Small shared cache | `Mutex` / `RwLock` | Short critical sections only |
-| Serialized state machine | Actor task + channel | State owned by task |
-| Shared counter | Atomics | Keep memory ordering simple |
-
----
-
-## Review Checklist
-
-- [ ] Is concurrency necessary, or would sequential code be clearer?
-- [ ] Is every queue bounded unless explicitly justified?
-- [ ] Are task results observed?
-- [ ] Is there a shutdown path?
-- [ ] Are locks held only for short, non-async critical sections?
-- [ ] Is CPU work kept off the async runtime?
-- [ ] Are domain messages explicit types?
-- [ ] Is shared mutable state avoided or isolated?
-- [ ] Is cancellation behavior documented?
-
----
-
-## Additional Resources
+## References
 
 - Rust Book: Fearless Concurrency: https://doc.rust-lang.org/book/ch16-00-concurrency.html
 - Tokio Tutorial: https://tokio.rs/tokio/tutorial

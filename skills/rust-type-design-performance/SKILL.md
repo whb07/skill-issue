@@ -1,44 +1,32 @@
 ---
 name: rust-type-design-performance
-description: "Design Rust types for performance: private fields and sealed traits by default, small Copy newtypes, slices over owned containers, iterators over intermediate Vecs, generics for hot paths, trait objects at boundaries, and measured allocation control. Use unsafe only with proof."
-invocable: false
+description: Design and review Rust types and APIs for performance using private representation, borrowed inputs, small Copy newtypes, enums for closed sets, generics for hot paths, trait objects at boundaries, iterator-based allocation control, careful async type design, layout awareness, and justified unsafe. Use when optimizing Rust code, designing performance-sensitive public APIs, reducing clones and allocations, choosing between structs/enums/traits/generics/dyn, or reviewing strings, bytes, slices, paths, collections, futures, and memory layout.
 ---
 
 # Rust Type Design for Performance
 
-## When to Use This Skill
+## Operating Model
 
-Use this skill when:
+Performance-friendly Rust starts with precise ownership and representation choices. Prefer APIs that let callers borrow, stream, and choose when to allocate.
 
-- Designing new Rust types and APIs
-- Reviewing code for avoidable allocations, cloning, dispatch overhead, or lock contention
-- Choosing between structs, enums, traits, generics, and trait objects
-- Working with strings, bytes, paths, slices, iterators, or async hot paths
-- Optimizing code after profiling or benchmark evidence
+Default stance:
 
----
+1. Keep representation private unless public fields are the intentional API.
+2. Borrow inputs by default.
+3. Use small newtypes for type safety without runtime cost.
+4. Use enums for closed variants and traits for open behavior.
+5. Use generics in hot paths and `dyn Trait` at runtime boundaries.
+6. Allocate at boundaries, not in the middle of pipelines.
+7. Keep pure calculations synchronous.
+8. Treat layout and unsafe as measured engineering decisions, not style choices.
 
-## Core Principles
+Measure before cleverness. Prefer obvious code until profiling, allocation counts, or type-size evidence shows a real problem.
 
-1. **Encapsulation is performance control** - Private fields let you change representation without breaking callers.
-2. **Borrowed inputs first** - Accept `&str`, `&[T]`, `&Path`, and iterators before owned containers.
-3. **Small value types are cheap** - Use newtypes and `Copy` for small scalars; avoid `Copy` for expensive or ownership-bearing values.
-4. **Closed sets use enums** - Enums avoid heap allocation and dynamic dispatch for known variants.
-5. **Open sets use traits** - Use generics for hot paths and `dyn Trait` at boundaries.
-6. **Pure functions are free of hidden state** - Prefer free functions or associated functions when no state is needed.
-7. **Allocate at boundaries** - Stream, borrow, and iterate internally; collect only when the caller needs ownership.
-8. **Async has cost** - Do not make hot pure code async; avoid boxed futures in tight loops.
-9. **Unsafe is a last resort** - Require a benchmark, a safety comment, and tests.
-10. **Measure before cleverness** - Prefer obvious code until profiling says otherwise.
+## Private Representation
 
----
-
-## Rust Equivalent of “Seal by Default”
-
-Rust structs are not inherited, but public APIs are still extensibility contracts. Seal representation with privacy.
+Private fields preserve invariants and allow representation changes without breaking callers.
 
 ```rust
-// DO: representation is private and can change later.
 pub struct OrderProcessor {
     max_batch_size: usize,
     retry_policy: RetryPolicy,
@@ -57,7 +45,6 @@ impl OrderProcessor {
     }
 }
 
-// Private pure helper. Not part of public API.
 fn process_batch(
     orders: &[Order],
     max_batch_size: usize,
@@ -70,17 +57,21 @@ fn process_batch(
 }
 ```
 
-Avoid public fields unless they are the stable API:
+Avoid public fields for growing or performance-sensitive types:
 
 ```rust
-// DON'T for growing public types: locks representation forever.
 pub struct OrderProcessor {
     pub max_batch_size: usize,
     pub retry_policy: RetryPolicy,
 }
 ```
 
-### Seal Traits You Own
+Representation rules:
+
+- Use private fields for domain types, handles, caches, clients, processors, and collections with invariants.
+- Expose slices, iterators, and accessors instead of concrete internal containers.
+- Use public fields only when literal construction and direct field access are deliberately stable.
+- Seal traits when downstream implementations would block future optimization or representation changes.
 
 ```rust
 mod sealed {
@@ -90,25 +81,11 @@ mod sealed {
 pub trait WireMessage: sealed::Sealed {
     fn message_type(&self) -> &'static str;
 }
-
-pub struct OrderCreated;
-
-impl sealed::Sealed for OrderCreated {}
-
-impl WireMessage for OrderCreated {
-    fn message_type(&self) -> &'static str {
-        "order.created"
-    }
-}
 ```
 
-Use sealed traits when downstream implementations would prevent future optimization or evolution.
+## Small Value Types
 
----
-
-## Small Value Types and Newtypes
-
-Newtypes improve type safety and can be zero-cost.
+Newtypes improve type safety and are usually zero-cost.
 
 ```rust
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -133,24 +110,22 @@ Use `#[repr(transparent)]` only when layout compatibility matters:
 pub struct UserHandle(u64);
 ```
 
-**Value type rules:**
+Value type rules:
 
 | Use | When |
 |---|---|
-| `Copy` | Small scalar wrappers: IDs, handles, flags, coordinates |
-| `Clone` only | Values with heap allocation or meaningful duplication cost |
-| `#[repr(transparent)]` | FFI/layout guarantee around one field |
-| `NonZero*` | IDs or handles where zero is invalid and `Option<T>` should stay compact |
-| `Arc<T>` | Shared ownership across tasks/threads |
-| `Box<T>` | Stable address, recursive types, large enum variants |
+| `Copy` | Small scalar wrappers where duplication is cheap and invisible |
+| `Clone` only | Values with allocation or meaningful duplication cost |
+| `#[repr(transparent)]` | Layout guarantee around one field |
+| `NonZero*` | Invalid-zero IDs or handles where `Option<T>` should stay compact |
+| `Arc<T>` | Shared immutable ownership across tasks or threads |
+| `Box<T>` | Stable address, recursive types, or rare large enum variants |
 
-Do not derive `Copy` just because the compiler permits it. `Copy` says duplication is invisible and cheap.
+Do not derive `Copy` just because the compiler permits it. `Copy` is an API promise that duplication is cheap and unsurprising.
 
----
+## Structs, Enums, Generics, and `dyn Trait`
 
-## Struct vs Enum vs Trait Object
-
-### Use Structs for Data with One Shape
+Use structs for one data shape:
 
 ```rust
 pub struct Money {
@@ -159,7 +134,7 @@ pub struct Money {
 }
 ```
 
-### Use Enums for Closed Variants
+Use enums for known closed variants:
 
 ```rust
 pub enum Discount {
@@ -177,9 +152,7 @@ pub fn apply_discount(total: Money, discount: Discount) -> Money {
 }
 ```
 
-Enums keep data inline and make matches exhaustive. They are ideal for closed business states and known strategy sets.
-
-### Use Generics for Hot Open Behavior
+Use generics for hot open behavior:
 
 ```rust
 pub trait PriceRule {
@@ -194,9 +167,7 @@ where
 }
 ```
 
-Generics use static dispatch and enable inlining, at the cost of larger generated code.
-
-### Use `dyn Trait` at Boundaries
+Use `dyn Trait` at boundaries:
 
 ```rust
 pub struct CheckoutService {
@@ -204,13 +175,19 @@ pub struct CheckoutService {
 }
 ```
 
-Trait objects are appropriate when you need runtime polymorphism, plugin boundaries, or dependency injection. Do not put `dyn Trait` in inner loops without measuring.
+Dispatch rules:
 
----
+- Use enums when variants are known and exhaustiveness is valuable.
+- Use generics for hot loops, library internals, and code that benefits from inlining.
+- Use `dyn Trait` for runtime composition, plugin systems, dependency injection, and application wiring.
+- Avoid `dyn Trait` in inner loops unless measured.
+- Avoid exposing huge generic types in public APIs when `impl Trait` can hide them.
+- Use `#[inline]` selectively for tiny cross-crate functions and accessors.
+- Do not use `#[inline(always)]` without measurement.
 
-## Static Pure Functions
+## Pure Functions
 
-Rust’s simplest high-performance unit is a pure function.
+Pure functions are fast, testable, and easy for LLVM to optimize.
 
 ```rust
 pub fn calculate_total(items: &[OrderItem]) -> Money {
@@ -218,7 +195,7 @@ pub fn calculate_total(items: &[OrderItem]) -> Money {
 }
 ```
 
-Use associated functions when the function belongs to a type but does not need `self`:
+Use associated functions when construction belongs to a type but does not need `self`:
 
 ```rust
 impl Money {
@@ -228,19 +205,17 @@ impl Money {
 }
 ```
 
-**Rules:**
+Function rules:
 
-- Use methods when behavior depends on `self` or preserves invariants.
-- Use free functions for stateless transformations within a module.
+- Use methods when behavior depends on `self` or preserves type invariants.
+- Use free functions for stateless transformations inside a module.
 - Pass dependencies explicitly to pure functions.
 - Avoid service structs with hidden dependencies for simple calculations.
-- Pure functions are naturally thread-safe, easy to test, and easy for LLVM to optimize.
+- Keep pure CPU work synchronous.
 
----
+## Borrowed Inputs
 
-## Slices, Strings, Paths, and Bytes
-
-Owned containers in parameters force callers to allocate or give up ownership. Borrow instead.
+Owned containers in parameters force callers to allocate or transfer ownership. Borrow instead.
 
 ```rust
 use std::path::Path;
@@ -259,20 +234,21 @@ pub fn load_config(path: &Path) -> Result<Config, ConfigError> {
 }
 ```
 
-**Type choices:**
+Type choices:
 
 | Scenario | Prefer | Avoid |
 |---|---|---|
-| Read text | `&str` | `&String`, `String` |
-| Store text | `String`, `Box<str>`, `Arc<str>` | `'static str` hacks |
+| Read text | `&str` | `&String`, owned `String` |
+| Store text | `String`, `Box<str>`, `Arc<str>` | `'static str` workarounds |
 | Read bytes | `&[u8]` | `&Vec<u8>` |
-| Mutable bytes | `&mut [u8]` | Allocating a new `Vec<u8>` per operation |
+| Mutate bytes | `&mut [u8]` | Allocating per operation |
 | Read path | `&Path` | `&PathBuf`, `&str` for filesystem paths |
 | Store path | `PathBuf` | `String` |
-| Maybe owned text | `Cow<'a, str>` | unconditional clone |
-| Shared immutable large value | `Arc<T>` | cloning whole value |
+| Maybe owned text | `Cow<'a, str>` | Unconditional clone |
+| Shared immutable large value | `Arc<T>` | Cloning the whole value |
+| Fixed owned sequence | `Box<[T]>` | Keeping spare `Vec<T>` capacity |
 
-### Use `Cow` for Maybe-Owned Data
+Use `Cow` when avoiding common-case allocation is meaningful and the API remains readable:
 
 ```rust
 use std::borrow::Cow;
@@ -288,20 +264,13 @@ pub fn normalize_header<'a>(value: &'a str) -> Cow<'a, str> {
 }
 ```
 
-Do not use `Cow` everywhere. Use it when avoiding common-case allocation is meaningful and the API remains readable.
-
----
+Do not spread `Cow` through ordinary APIs where a borrowed input and owned output are clearer.
 
 ## Iterators and Allocation Control
 
-### Defer Collection
+Defer collection until ownership is needed.
 
 ```rust
-// BAD: repeated materialization.
-let active: Vec<_> = orders.iter().filter(|order| order.is_active()).collect();
-let sorted: Vec<_> = active.into_iter().sorted_by_key(Order::created_at).collect();
-
-// GOOD: collect once when needed.
 let mut active: Vec<_> = orders
     .iter()
     .filter(|order| order.is_active())
@@ -317,7 +286,7 @@ pub fn active_orders(orders: &[Order]) -> impl Iterator<Item = &Order> {
 }
 ```
 
-### Preallocate When Size Is Known
+Preallocate when size is known:
 
 ```rust
 pub fn render_lines(lines: &[Line]) -> Vec<String> {
@@ -331,149 +300,115 @@ pub fn render_lines(lines: &[Line]) -> Vec<String> {
 }
 ```
 
-### Avoid Accidental Clones in Iterator Chains
+Avoid accidental clones in iterator chains:
 
 ```rust
-// BAD: clones every order.
-let paid: Vec<Order> = orders
-    .iter()
-    .cloned()
-    .filter(Order::is_paid)
-    .collect();
-
-// GOOD: borrow until ownership is required.
 let paid: Vec<&Order> = orders
     .iter()
     .filter(|order| order.is_paid())
     .collect();
 ```
 
-**Iterator rules:**
+Iterator rules:
 
 - Use iterator chains for simple transformations.
-- Use `for` loops when error handling, mutation, or early exits are clearer.
+- Use `for` loops when mutation, error handling, or early exits are clearer.
 - Collect once, at the boundary.
-- Prefer `sort_by_key` on a single `Vec` over collect-sort-collect chains.
-- Use `SmallVec`, `ArrayVec`, and custom arenas only after profiling shows allocation pressure.
+- Use `extend` to add iterator output to an existing collection instead of collecting and appending.
+- Implement `size_hint` or `ExactSizeIterator::len` for custom iterators when accurate.
+- Prefer `filter_map` over `filter` followed by `map` in hot iterator chains when it stays clear.
+- Prefer `chunks_exact` when chunk size is known to divide a slice, or handle the remainder explicitly.
+- Use `iter().copied()` for small `Copy` values in hot loops when references pessimize codegen.
+- Prefer sorting one `Vec` over collect-sort-collect chains.
+- Use `SmallVec`, `ArrayVec`, arenas, or bump allocation only after profiling shows allocation pressure.
 
----
+Reuse collections at hot allocation sites:
+
+```rust
+let mut line = String::new();
+while reader.read_line(&mut line)? != 0 {
+    process(&line);
+    line.clear();
+}
+```
+
+Reuse rules:
+
+- Use `Vec::with_capacity`, `String::with_capacity`, `reserve`, or `reserve_exact` when size is known.
+- Reuse workhorse `Vec` and `String` values with `clear()` in hot loops.
+- Use `clone_from` to reuse an existing allocation when replacing an owned value with a clone.
+- Use `SmallVec` for many short vectors, `ArrayVec` when the maximum length is fixed, and benchmark both.
 
 ## Collection Return Types
 
-Rust APIs should communicate ownership precisely.
+Return types should communicate ownership precisely.
 
 ```rust
-// Borrowed view. No allocation.
 pub fn items(&self) -> &[OrderItem] {
     &self.items
 }
 
-// Caller owns snapshot.
 pub fn into_items(self) -> Vec<OrderItem> {
     self.items
 }
 
-// Lazy borrowed iteration.
 pub fn active_items(&self) -> impl Iterator<Item = &OrderItem> {
     self.items.iter().filter(|item| item.is_active())
 }
 ```
 
-**Return type guidelines:**
+Return type guidelines:
 
 | Need | Return |
 |---|---|
 | Borrow internal sequence | `&[T]` |
-| Borrow mutable internal sequence | `&mut [T]` only when mutation is the API |
+| Mutate internal sequence | `&mut [T]` only when mutation is the API |
 | Transfer owned sequence | `Vec<T>` |
+| Transfer fixed owned sequence | `Box<[T]>` |
 | Lazy derived values | `impl Iterator<Item = T>` or `impl Iterator<Item = &T>` |
 | Maybe one item | `Option<T>` or `Option<&T>` |
 | Shared immutable data | `Arc<T>` or `Arc<[T]>` |
 | Stable text view | `&str` |
 | Owned text | `String` or `Box<str>` |
 
-Avoid returning `&Vec<T>`; it exposes the implementation without adding value.
+Avoid returning `&Vec<T>`; it exposes implementation without adding useful capability.
 
----
+## Async Type Design
 
-## Dispatch and Inlining
-
-### Static Dispatch for Hot Paths
+Async Rust creates state machines. That is powerful, but not free.
 
 ```rust
-pub fn encode<W>(message: &Message, writer: &mut W) -> Result<(), EncodeError>
-where
-    W: std::io::Write,
-{
-    // monomorphized for each writer type
-    write_message(message, writer)
-}
-```
-
-### Dynamic Dispatch for Boundaries
-
-```rust
-pub struct Server {
-    handlers: Vec<Box<dyn Handler + Send + Sync>>,
-}
-```
-
-**Rules:**
-
-- Use generics inside libraries and hot loops.
-- Use `dyn Trait` for runtime composition, plugin systems, and application wiring.
-- Avoid exposing huge generic types in public APIs when `impl Trait` can hide them.
-- Use `#[inline]` selectively for tiny cross-crate functions and accessors.
-- Do not carpet-bomb `#[inline(always)]`; it can make performance worse.
-
----
-
-## Async Type Design Performance
-
-Async Rust creates state machines. That is powerful, not free.
-
-```rust
-// DO: pure function is sync.
 pub fn validate_order(command: &CreateOrderCommand) -> Result<(), ValidationError> {
-    // CPU-only validation
+    // CPU-only validation.
 }
 
-// DO: async function performs I/O.
 pub async fn save_order(repository: &OrderRepository, order: Order) -> Result<(), SaveError> {
     repository.save(order).await
 }
 ```
 
-**Async rules:**
+Async performance rules:
 
 - Do not use async for pure calculations.
-- Avoid `async_trait` on hot-path traits; it boxes futures.
+- Avoid `async_trait` on hot-path traits because it usually boxes futures.
 - Prefer concrete async functions for application services.
-- Prefer channels for background work instead of spawning unbounded tasks.
-- Avoid holding large values across `.await`; the future stores them.
+- Use native `async fn` in traits or associated future types when allocation matters.
+- Avoid holding large values across `.await`; the generated future stores them.
+- Prefer channels or worker pools for background work instead of unbounded task spawning.
 - Use `spawn_blocking` for blocking CPU or sync I/O called from async contexts.
 
----
-
-## Memory Layout and Large Types
+## Memory Layout
 
 Large enum variants can bloat every value of the enum.
 
 ```rust
-// BAD: one huge variant makes the entire enum huge.
-pub enum Event {
-    Small(SmallEvent),
-    Huge([u8; 4096]),
-}
-
-// BETTER: box the rare huge variant.
 pub enum Event {
     Small(SmallEvent),
     Huge(Box<[u8; 4096]>),
 }
 ```
 
-Measure type sizes in tests when it matters:
+Measure type sizes in tests when layout matters:
 
 ```rust
 #[test]
@@ -482,17 +417,52 @@ fn event_size_stays_reasonable() {
 }
 ```
 
-**Layout rules:**
+Layout rules:
 
 - Keep frequently copied values small.
 - Box rare large enum variants.
+- Use `Box<[T]>` for owned sequences that will not grow; it stores pointer plus length without vector capacity.
+- Consider `ThinVec` for often-empty vectors inside hot, frequently instantiated types.
+- Consider smaller integer fields such as `u32` or `u16` for stored indices when bounds make that valid.
 - Use `Option<NonZeroU64>` or `Option<NonNull<T>>` when niche optimization matters.
+- Use static size assertions for hot types where accidental growth would hurt.
 - Do not rely on Rust layout unless using `repr(C)` or `repr(transparent)`.
 - Never change representation for FFI-exposed types without ABI review.
+- Verify cache-sensitive changes with benchmarks, not intuition.
 
----
+Rust may copy types larger than roughly 128 bytes with `memcpy`; if `memcpy` is hot, inspect type sizes and consider shrinking hot types.
 
-## Unsafe Policy
+## Hashing and I/O
+
+Use specialized choices only when profiling identifies the bottleneck.
+
+Hashing rules:
+
+- Try faster hashers such as `rustc_hash`, `fnv`, or `ahash` only when hashing is hot and HashDoS resistance is not required.
+- Use `nohash_hasher` for suitable integer-like keys that do not need real hashing.
+- Preallocate hot `HashMap` and `HashSet` values when the expected size is known.
+- Treat byte-wise hashing as advanced; require layout proof and measurement.
+
+I/O rules:
+
+- Lock stdout, stdin, or stderr manually when doing repeated operations.
+- Use `BufReader` and `BufWriter` for many small reads or writes.
+- Flush buffered writers explicitly when flush errors matter.
+- Prefer `BufRead::read_line` with a reused `String` over `BufRead::lines` in hot line-reading loops.
+- Use byte-oriented input such as `read_until` when UTF-8 validation is unnecessary.
+
+## Lazy Standard Library APIs
+
+Prefer lazy variants when fallback construction may be expensive:
+
+```rust
+let value = maybe_value.unwrap_or_else(|| build_default());
+let result = maybe_id.ok_or_else(|| make_error(context));
+```
+
+Use `*_or_else` forms for `Option` and `Result` when the fallback allocates, formats, clones, or computes nontrivially.
+
+## Unsafe
 
 Default policy:
 
@@ -518,105 +488,89 @@ unsafe {
 }
 ```
 
-**Unsafe rules:**
+Unsafe rules:
 
-- Use safe Rust unless a benchmark proves the need.
+- Use safe Rust unless a benchmark or boundary requirement proves the need.
 - Prefer standard library APIs and well-reviewed crates over custom unsafe code.
 - Keep unsafe blocks tiny and wrapped in safe APIs.
+- State the aliasing, lifetime, initialization, and thread-safety invariants.
 - Test unsafe abstractions with Miri where possible.
-- Add property tests around boundary conditions.
-
----
-
-## Quick Reference
-
-| Pattern | Benefit |
-|---|---|
-| Private fields | Representation can change; invariants preserved |
-| Sealed traits | Prevent unsupported downstream implementations |
-| Small `Copy` newtypes | Type safety with zero runtime cost |
-| `&str`, `&[T]`, `&Path` params | Avoid forced allocation and ownership transfer |
-| `impl Iterator` returns | Lazy, allocation-free derived views |
-| `Vec::with_capacity` | Avoid repeated reallocations |
-| Enums for closed variants | Exhaustive, inline, no virtual dispatch |
-| Generics for hot paths | Static dispatch and inlining |
-| `dyn Trait` at boundaries | Runtime composition without generic explosion |
-| `Cow<'a, str>` | Avoid common-case clone |
-| Box rare large enum variants | Keep enum size small |
-| Pure free functions | No hidden state, easy optimization |
-
----
-
-## Anti-Patterns
-
-```rust
-// DON'T: accept owned String for read-only parsing.
-pub fn parse_id(value: String) -> Result<OrderId, Error> { ... }
-
-// DO: borrow.
-pub fn parse_id(value: &str) -> Result<OrderId, Error> { ... }
-```
-
-```rust
-// DON'T: expose Vec implementation.
-pub fn items(&self) -> &Vec<OrderItem> { &self.items }
-
-// DO: expose a slice.
-pub fn items(&self) -> &[OrderItem] { &self.items }
-```
-
-```rust
-// DON'T: dynamic dispatch in inner loop without reason.
-fn score_all(rules: &[Box<dyn Rule>], orders: &[Order]) -> Vec<Score> { ... }
-
-// DO: use enum or generics for known hot strategies.
-enum RuleKind { Standard(StandardRule), Premium(PremiumRule) }
-```
-
-```rust
-// DON'T: collect intermediate vectors reflexively.
-let values = items.iter().map(a).collect::<Vec<_>>();
-let values = values.iter().map(b).collect::<Vec<_>>();
-
-// DO: chain and collect once, or use a loop if clearer.
-let values = items.iter().map(a).map(b).collect::<Vec<_>>();
-```
-
-```rust
-// DON'T: async pure function.
-pub async fn calculate_total(items: &[OrderItem]) -> Money { ... }
-
-// DO: sync pure function.
-pub fn calculate_total(items: &[OrderItem]) -> Money { ... }
-```
-
-```rust
-// DON'T: blanket clone.
-let snapshot = value.clone();
-
-// DO: borrow, move, or document the clone.
-let snapshot = value.clone(); // intentional: immutable audit snapshot
-```
-
----
+- Add property tests or fuzzing around boundary conditions when risk is meaningful.
 
 ## Review Checklist
 
-- [ ] Are public fields necessary, or should representation be private?
-- [ ] Can parameters be borrowed instead of owned?
-- [ ] Are clones intentional and visible?
-- [ ] Are intermediate collections avoided?
-- [ ] Is `Copy` limited to cheap scalar values?
-- [ ] Are closed variants modeled as enums?
-- [ ] Are hot paths using static dispatch where appropriate?
-- [ ] Are trait objects only at boundaries or measured hot paths?
-- [ ] Are async functions actually doing async work?
-- [ ] Is unsafe forbidden or tightly justified?
-- [ ] Has performance-sensitive code been benchmarked?
+Use this checklist for performance-sensitive Rust type and API reviews:
 
----
+- [ ] Public fields are intentional; otherwise representation is private.
+- [ ] Parameters borrow instead of forcing ownership.
+- [ ] Clones are intentional, cheap, or documented.
+- [ ] Newtypes protect primitive values without unnecessary allocation.
+- [ ] `Copy` is limited to cheap scalar values.
+- [ ] Closed variants use enums.
+- [ ] Hot paths use static dispatch when appropriate.
+- [ ] Trait objects are at boundaries or justified by measurement.
+- [ ] Intermediate collections are avoided.
+- [ ] Hot collections reuse capacity or preallocate when sizes are known.
+- [ ] Return types communicate ownership precisely.
+- [ ] Hashing and I/O choices match the measured bottleneck.
+- [ ] Async functions actually perform async work.
+- [ ] Large values are not held across `.await` without reason.
+- [ ] Large enum variants, layout-sensitive types, and FFI types have size/layout review.
+- [ ] Unsafe is forbidden or narrowly justified with safety comments and tests.
+- [ ] Performance-sensitive changes have benchmarks or profiling evidence.
 
-## Resources
+## Common Anti-Patterns
+
+### Owned Input for Read-Only Work
+
+```rust
+pub fn parse_id(value: String) -> Result<OrderId, Error> { ... }
+```
+
+Accept `&str` instead.
+
+### Exposing Concrete Collections
+
+```rust
+pub fn items(&self) -> &Vec<OrderItem> { &self.items }
+```
+
+Expose `&[OrderItem]` instead.
+
+### Dynamic Dispatch in Hot Loops
+
+```rust
+fn score_all(rules: &[Box<dyn Rule>], orders: &[Order]) -> Vec<Score> { ... }
+```
+
+Use enums or generics for known hot strategies unless measurement supports dynamic dispatch.
+
+### Reflexive Intermediate Collections
+
+```rust
+let values = items.iter().map(a).collect::<Vec<_>>();
+let values = values.iter().map(b).collect::<Vec<_>>();
+```
+
+Chain and collect once, or use a loop when clearer.
+
+### Async Pure Functions
+
+```rust
+pub async fn calculate_total(items: &[OrderItem]) -> Money { ... }
+```
+
+Make pure calculations synchronous.
+
+### Blanket Cloning
+
+```rust
+let snapshot = value.clone();
+```
+
+Borrow, move, or document why the clone is intentional.
+
+## References
 
 - Rust API Guidelines: https://rust-lang.github.io/api-guidelines/
 - Rust Performance Book: https://nnethercote.github.io/perf-book/
