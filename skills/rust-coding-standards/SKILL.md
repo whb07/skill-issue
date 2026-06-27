@@ -1,5 +1,5 @@
 ---
-name: modern-rust-coding-standards
+name: rust-coding-standards
 description: Write, refactor, and review idiomatic modern Rust code using ownership-first design, private invariants, typed domain models, enums, Option/Result, explicit error handling, borrowing over cloning, small traits, explicit DTO mapping, async discipline, and measured unsafe. Use when implementing Rust features, translating object-oriented designs into Rust, reviewing Rust code quality, or correcting needless cloning, stringly typed state, panics, weak errors, broad traits, hidden allocation, or blocking async code.
 ---
 
