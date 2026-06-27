@@ -1,61 +1,54 @@
 ---
 name: rust-api-design
-description: Design stable Rust public APIs and wire formats using extend-only principles, semantic versioning, non_exhaustive types, sealed traits, feature discipline, explicit DTOs, and compatibility testing. Avoid accidental breaking changes in crates, protocols, and FFI boundaries.
-invocable: false
+description: Design and review stable Rust public APIs, semver-sensitive crate changes, wire formats, feature flags, FFI boundaries, and compatibility tests. Use when changing exported types, traits, functions, modules, Cargo features, MSRV, serialization schemas, plugin interfaces, or any contract consumed outside the current crate. Emphasize extend-only design, private representation, non_exhaustive enums, sealed traits, explicit DTOs, staged migrations, and tooling that catches accidental breaking changes.
 ---
 
 # Rust Public API Design and Compatibility
 
-## When to Use This Skill
+## Operating Model
 
-Use this skill when:
+Treat every public surface as a contract with four compatibility dimensions:
 
-- Designing public APIs for Rust crates
-- Making changes to exported types, traits, functions, modules, or feature flags
-- Planning serialization or wire-format changes
-- Reviewing pull requests for semver breaks
-- Publishing crates to crates.io or maintaining internal shared crates
-- Exposing FFI or plugin boundaries
-
----
-
-## The Compatibility Model
-
-Rust compatibility has more traps than it first appears.
-
-| Type | Definition | Scope |
+| Dimension | Question | Examples |
 |---|---|---|
-| **Source compatibility** | Existing downstream source still compiles | Public items, signatures, trait bounds, fields, variants, feature flags |
-| **Semantic compatibility** | Existing downstream behavior still works | Defaults, invariants, errors, ordering, retries, timing |
-| **Wire compatibility** | Old and new serialized data interoperate | JSON, protobuf, MessagePack, persistence, network protocols |
-| **FFI/ABI compatibility** | External callers can safely link/call | `extern "C"`, `#[repr(C)]`, symbols, layout |
+| Source | Does downstream source still compile? | item names, signatures, fields, variants, trait bounds, features |
+| Semantic | Does downstream behavior still match expectations? | defaults, invariants, errors, ordering, retries, timing |
+| Wire | Can old and new serialized data interoperate? | JSON, protobuf, MessagePack, persistence, network protocols |
+| FFI/ABI | Can external callers still link and call safely? | symbols, layouts, allocation rules, `extern "C"` functions |
 
-Rust has no stable Rust ABI. If ABI matters, expose a C-compatible API and treat it as a separate product.
+Rust has no stable Rust-to-Rust ABI. If ABI matters, expose a C-compatible API and version it as a separate product.
 
----
+Use this default stance:
 
-## Extend-Only Design
+1. Preserve released contracts.
+2. Add new contracts beside old ones.
+3. Deprecate before removing.
+4. Make compatibility claims testable.
 
-The foundation of stable Rust APIs: **never remove or mutate released contracts; add new contracts alongside old ones.**
+Rust-specific caution: "additive" does not always mean compatible. Adding enum variants, trait methods, trait impls, blanket impls, public fields, default features, or stricter bounds can break downstream code depending on the original API shape.
 
-### Three Pillars
+## Release Decision Rules
 
-1. **Released behavior is immutable** - Once public, signatures and documented behavior are locked.
-2. **New behavior uses new constructs** - Add new functions, types, builders, enum variants only when the type was designed for extension.
-3. **Removal requires deprecation and a major version** - Give users time, warnings, and a migration path.
+| Change | Minimum release | Notes |
+|---|---|---|
+| Bug fix with compatible behavior | Patch | Avoid changing documented defaults or observable semantics. |
+| New free function, type, module, or inherent method | Minor | Review method-name conflicts and inference changes. |
+| New Cargo feature that only adds APIs | Minor | Keep features additive. |
+| Deprecation with working replacement | Minor | Add replacement in the same release. |
+| MSRV increase | Minor | Only if policy allows; document it. |
+| Removed item, renamed item, changed signature, required field, required trait method | Major | Provide migration notes. |
+| New variant on released exhaustive enum | Major | Use `#[non_exhaustive]` before release if variants may grow. |
+| Changed wire default, tag, field meaning, numeric code, or ABI layout | Usually major or staged migration | Stage reads before writes for distributed systems. |
 
-### Rust-Specific Rule
+Patch releases should be uneventful. Minor releases may add capabilities, but must not flip defaults casually. Major releases still need precise migration guidance.
 
-In Rust, “just adding something” can still break users. Adding trait methods, enum variants, trait impls, blanket impls, default features, or public fields can be breaking depending on the original shape. Design extension points up front.
+## Design for Extension
 
----
+### Keep Representation Private
 
-## API Shape Defaults
-
-### Prefer Private Fields
+Prefer private fields for domain types, clients, builders, handles, errors with internal context, and configuration expected to grow.
 
 ```rust
-// DO: extensible; fields can change without breaking callers.
 #[derive(Debug, Clone)]
 pub struct ClientOptions {
     timeout: std::time::Duration,
@@ -82,15 +75,16 @@ impl ClientOptions {
 }
 ```
 
+Avoid public fields for growing types:
+
 ```rust
-// AVOID for public domain/config types: adding a required field breaks construction.
 pub struct ClientOptions {
     pub timeout: std::time::Duration,
     pub max_retries: u32,
 }
 ```
 
-Public fields are acceptable for stable DTOs and simple data carriers, but once released they are hard to evolve.
+Adding a required public field breaks callers that construct the struct with a literal. Public fields are acceptable for stable DTOs and simple data carriers when that literal construction is deliberately part of the API.
 
 ### Use Builders for Growing Options
 
@@ -127,32 +121,27 @@ impl ClientBuilder {
 }
 ```
 
-**Builder rules:**
+Builder rules:
 
-- Builders are better than long functions with many parameters.
-- Builder methods should be additive and chainable.
-- Keep defaults stable. If defaults must change, introduce a new named mode or builder method.
-- Fallible build belongs in `build()`, not in every setter.
+- Use builders instead of long public functions with many parameters.
+- Keep setters chainable and additive.
+- Keep defaults stable. If defaults must change, add an explicit named mode.
+- Put cross-field validation in `build()`, not every setter.
+- Avoid exposing builder fields unless literal construction is intentionally stable.
 
----
+## API Change Classification
 
-## Safe and Unsafe API Changes
-
-### Usually Safe Changes
+### Usually Compatible
 
 ```rust
-// SAFE: add a new free function.
 pub fn parse_order_id(value: &str) -> Result<OrderId, ParseOrderIdError> { ... }
 
-// SAFE: add a new inherent method with a distinct name.
 impl Client {
     pub fn with_user_agent(mut self, user_agent: impl Into<String>) -> Self { ... }
 }
 
-// SAFE: add a new type.
 pub struct RetryPolicy { ... }
 
-// SAFE: add a default method to a trait.
 pub trait Transport {
     fn send(&self, request: Request) -> Result<Response, TransportError>;
 
@@ -164,102 +153,62 @@ pub trait Transport {
         self.send(request)
     }
 }
-
-// SAFE if the enum was marked non_exhaustive before release.
-#[non_exhaustive]
-pub enum Event {
-    Created,
-    Updated,
-    Deleted,
-}
 ```
 
-Even “safe” changes require review. New inherent methods can conflict with downstream trait methods in method-call syntax. New trait impls can affect type inference. Use semver tooling and changelog review.
+Still review compatible-looking changes. New inherent methods can conflict with downstream trait methods in method-call syntax. New impls can change inference and trait selection. New defaults can change behavior even when signatures are untouched.
 
-### Breaking Changes
+### Breaking
 
 ```rust
-// BREAKING: remove or rename a public item.
-pub fn submit_order(order: Order) { ... } // was process_order
+pub fn submit_order(order: Order) { ... } // renamed from process_order
 
-// BREAKING: change parameter or return types.
 pub fn get_order(id: OrderId) -> Result<Order, Error> { ... } // was Option<Order>
 
-// BREAKING: add a required parameter.
 pub fn send(request: Request, timeout: Duration) -> Result<Response, Error> { ... }
 
-// BREAKING: add a required field to a public struct literal.
 pub struct ClientOptions {
     pub timeout: Duration,
     pub max_retries: u32,
-    pub user_agent: String, // breaks callers constructing ClientOptions { ... }
+    pub user_agent: String,
 }
 
-// BREAKING: add a variant to an exhaustive public enum.
 pub enum OrderStatus {
     Draft,
     Submitted,
     Paid,
-    Refunded, // breaks exhaustive matches downstream
+    Refunded,
 }
 
-// BREAKING: add a required trait method.
 pub trait Transport {
     fn send(&self, request: Request) -> Result<Response, Error>;
-    fn close(&self) -> Result<(), Error>; // breaks all implementors
+    fn close(&self) -> Result<(), Error>;
 }
 
-// BREAKING: change trait bounds.
 pub fn process<T: Send + Sync>(value: T) { ... } // was T: Send
 ```
 
-### Compatibility Gray Areas
+Treat these as breaking unless proven otherwise:
 
-Treat these as requiring explicit review:
+- Removing, renaming, hiding, or moving public items.
+- Changing parameter types, return types, error types, lifetimes, const generics, or generic bounds.
+- Adding required parameters, required fields, required trait methods, or exhaustive enum variants.
+- Removing trait impls or changing auto-trait behavior (`Send`, `Sync`, `Unpin`) through representation changes.
+- Changing documented defaults, ordering, retry behavior, timeout behavior, or error classification.
 
-- Adding trait impls, especially blanket impls
-- Adding inherent methods with common names like `get`, `new`, `into_inner`, `try_from`
-- Tightening generic bounds
-- Loosening generic bounds that change inference
-- Changing auto-trait behavior (`Send`, `Sync`, `Unpin`) by changing fields
-- Changing feature defaults
-- Raising MSRV
-- Changing error variants or error display text consumed by users
-- Changing iteration order or hashing behavior when users may rely on it
+### Gray Areas That Need Explicit Review
 
----
+- Adding trait impls, especially blanket impls.
+- Adding inherent methods with common names such as `new`, `get`, `into_inner`, `try_from`, or `from_str`.
+- Loosening bounds in ways that change inference or selected impls.
+- Changing default features or feature dependency graphs.
+- Raising MSRV.
+- Changing error `Display` text when users parse it, even if they should not.
+- Changing iteration order, hashing, serialization order, or deterministic output.
+- Making previously possible construction impossible through stricter validation.
 
-## Deprecation Pattern
+## Enums
 
-```rust
-#[deprecated(
-    since = "1.4.0",
-    note = "use Client::send_request instead; this method will be removed in 2.0"
-)]
-pub fn send(&self, request: Request) -> Result<Response, Error> {
-    self.send_request(request)
-}
-
-pub fn send_request(&self, request: Request) -> Result<Response, Error> {
-    // new implementation
-}
-```
-
-**Rules:**
-
-- Deprecate in a minor release.
-- Keep the old API working.
-- Add the replacement in the same release.
-- Include examples in the migration guide.
-- Remove only in a planned major version.
-
----
-
-## Designing Extensible Enums
-
-### Closed Domain Enums
-
-Use normal enums when exhaustive matching is part of the value proposition.
+Use exhaustive enums for closed domains where downstream exhaustive matching is valuable.
 
 ```rust
 pub enum PaymentState {
@@ -270,11 +219,7 @@ pub enum PaymentState {
 }
 ```
 
-Do not add variants to a released exhaustive enum without a major version.
-
-### Extensible Public Enums
-
-Use `#[non_exhaustive]` when you expect to add variants.
+Use `#[non_exhaustive]` for public categories expected to grow, especially error kinds, events, and protocol classifications.
 
 ```rust
 #[non_exhaustive]
@@ -285,7 +230,7 @@ pub enum ApiErrorKind {
 }
 ```
 
-Downstream callers must include a wildcard arm:
+Downstream callers must then include a fallback arm:
 
 ```rust
 match error.kind() {
@@ -296,19 +241,18 @@ match error.kind() {
 }
 ```
 
-**Enum rules:**
+Enum rules:
 
-- Closed business invariants: exhaustive enum.
-- Public error kinds and protocol event categories: `#[non_exhaustive]` unless truly closed forever.
-- Wire enums: include `Unknown(value)` or preserve raw numeric/string representation when forward compatibility matters.
+- Do not add variants to a released exhaustive enum without a major version.
+- Mark structs and enum variants `#[non_exhaustive]` before release when fields or variants may grow.
+- Avoid wildcard matches inside the defining crate for business logic; exhaustive internal matches catch new cases.
+- For wire enums, preserve unknown numeric/string values with `Unknown(value)` or equivalent raw storage.
 
----
+## Traits
 
-## Traits as Public Contracts
+Public traits imply downstream implementations unless sealed. Decide up front whether users are supposed to implement the trait.
 
-Traits are the easiest Rust API surface to accidentally freeze.
-
-### Keep Traits Small
+Prefer small traits:
 
 ```rust
 pub trait Clock {
@@ -316,7 +260,7 @@ pub trait Clock {
 }
 ```
 
-### Default New Methods
+Add new trait behavior as a default method only when the default is correct for all existing implementors:
 
 ```rust
 pub trait Store {
@@ -328,7 +272,7 @@ pub trait Store {
 }
 ```
 
-### Seal Traits Not Meant for Users
+Seal traits users should not implement:
 
 ```rust
 mod sealed {
@@ -350,20 +294,40 @@ impl Event for OrderCreated {
 }
 ```
 
-**Trait rules:**
+Trait rules:
 
-- Public traits imply users can implement them unless sealed.
-- Adding a required method is breaking.
-- Blanket impls are dangerous; they can conflict with downstream code.
-- Prefer sealed traits for marker traits, internal extension traits, and protocol families controlled by the crate.
-- Prefer inherent methods for behavior on your own types.
-- Avoid object-safety surprises: decide whether `dyn Trait` is supported and test it.
+- Prefer inherent methods for behavior on types you own.
+- Use sealed traits for marker traits, extension points controlled by the crate, and protocol families with fixed implementors.
+- Avoid blanket impls unless coherence and downstream conflict risk have been reviewed.
+- Decide whether `dyn Trait` is supported. If yes, test object safety.
+- Adding associated types, generic parameters, supertraits, or required methods is breaking.
 
----
+## Deprecation
 
-## Feature Flags
+```rust
+#[deprecated(
+    since = "1.4.0",
+    note = "use Client::send_request instead; this method will be removed in 2.0"
+)]
+pub fn send(&self, request: Request) -> Result<Response, Error> {
+    self.send_request(request)
+}
 
-Feature flags are API.
+pub fn send_request(&self, request: Request) -> Result<Response, Error> {
+    // new implementation
+}
+```
+
+Deprecation rules:
+
+- Add the replacement before or in the same release as the deprecation.
+- Keep the deprecated API working until the planned major release.
+- Include examples and mechanical migration notes.
+- Do not use deprecation as a substitute for compatibility in patch releases.
+
+## Feature Flags and MSRV
+
+Feature flags are public API.
 
 ```toml
 [features]
@@ -373,47 +337,31 @@ native-tls = ["dep:native-tls"]
 json = ["dep:serde", "dep:serde_json"]
 ```
 
-**Feature rules:**
+Feature rules:
 
-- Features should be additive. Enabling a feature should not remove APIs.
-- Avoid mutually exclusive features. If unavoidable, fail fast with `compile_error!`.
+- Features should be additive. Enabling one feature should not remove APIs from another configuration.
+- Avoid mutually exclusive features. If unavoidable, reject invalid combinations with `compile_error!`.
 - Do not add heavy default features casually.
-- Removing a feature or dependency exposed through a feature is breaking.
-- Changing default features can be breaking even in a minor release.
+- Removing a feature or changing default features is breaking for many users.
 - Test feature combinations with `cargo hack` for shared crates.
 
----
+MSRV rules:
 
-## MSRV Policy
-
-Minimum Supported Rust Version is part of the contract.
-
-```text
-MSRV: 1.85.0
-Policy: MSRV may increase only in minor releases and will be called out in release notes.
-```
-
-**Rules:**
-
-- Declare `rust-version` in `Cargo.toml`.
-- CI should test MSRV if the crate promises one.
-- Do not raise MSRV in a patch release unless the project explicitly allows it.
-- Mention MSRV changes in the changelog.
-
----
+- Declare `rust-version` in `Cargo.toml` when the crate has an MSRV policy.
+- Test MSRV in CI if the project promises it.
+- Do not raise MSRV in a patch release unless the project explicitly says patch MSRV bumps are allowed.
+- Call out MSRV changes in release notes.
 
 ## Wire Compatibility
 
-For distributed systems, old and new versions must read each other's data during rolling upgrades.
+For distributed systems, old and new versions must interoperate during rolling upgrades.
 
 | Direction | Requirement |
 |---|---|
-| **Backward compatibility** | New readers can read old data |
-| **Forward compatibility** | Old readers can tolerate new data |
+| Backward compatibility | New readers can read old data. |
+| Forward compatibility | Old readers can tolerate new data. |
 
-Both matter for zero-downtime deployments.
-
-### Versioned DTOs, Not Domain Types
+Use explicit DTOs for wire contracts. Do not expose domain types as long-lived protocol schemas.
 
 ```rust
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -427,6 +375,7 @@ pub struct HeartbeatV2 {
     pub from: String,
     pub sequence: u64,
     #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at_unix_ms: Option<i64>,
 }
 
@@ -441,41 +390,36 @@ pub enum WireMessage {
 }
 ```
 
-### Rolling Upgrade Pattern
+Rolling upgrade sequence:
 
-1. **Read first** - Deploy code that can read old and new formats.
-2. **Write opt-in** - Add a config flag to emit the new format.
-3. **Enable gradually** - Turn on new writes after all readers understand them.
-4. **Make default later** - Only after the fleet and persisted data are safe.
-5. **Remove much later** - Usually a major version or explicit data migration.
+1. Deploy readers that accept old and new formats.
+2. Add a flag or config to opt into new writes.
+3. Enable new writes after all active readers support them.
+4. Make the new format default only after the fleet and persisted data are safe.
+5. Remove old support later through a major release or explicit migration.
 
-### Serde Rules
+Serde rules:
 
-- Use explicit DTOs for wire contracts.
-- Use `#[serde(default)]` for newly added optional fields.
+- Use stable protocol names, not Rust type names.
+- Use `#[serde(default)]` for newly added optional input fields.
 - Use `#[serde(skip_serializing_if = "Option::is_none")]` for optional output fields.
-- Use tagged enums for protocols, not Rust type names.
-- Avoid `deny_unknown_fields` for formats that must tolerate forward-compatible fields.
-- Do not rely on struct field order unless the format requires it and tests lock it down.
-- Be careful with `bincode` and similar binary formats; configuration and type shape changes can be wire breaks.
-
-### Schema Formats
+- Avoid `deny_unknown_fields` for forward-compatible formats.
+- Avoid untagged enums for long-lived protocols unless ambiguity is impossible and tested.
+- Treat `bincode`, `postcard`, and other type-shape-coupled formats as fragile unless configuration and schemas are locked down.
 
 Prefer schema-based formats for long-lived protocols:
 
-| Format | Compatibility Notes |
+| Format | Compatibility discipline |
 |---|---|
-| Protocol Buffers | Strong field-number compatibility; reserve removed fields |
-| Avro / JSON Schema | Good for data platforms with schema registry discipline |
-| JSON with explicit DTOs | Human-readable; forward compatibility requires conventions |
-| MessagePack with explicit schema conventions | Compact; avoid type-shape coupling |
-| bincode/postcard | Great for controlled environments; risky for public long-lived protocols |
+| Protocol Buffers | Reserve removed field numbers and names; never reuse tags. |
+| Avro / JSON Schema | Use schema registry rules and compatibility checks. |
+| JSON DTOs | Define defaults, unknown-field policy, and stable tags. |
+| MessagePack DTOs | Use explicit schema conventions; avoid implicit Rust shape coupling. |
+| bincode/postcard | Use only for controlled environments or version every payload. |
 
----
+## FFI and ABI
 
-## FFI and ABI Compatibility
-
-Rust-to-Rust ABI is not stable. Public Rust functions are not plugin ABI.
+Public Rust functions are not a plugin ABI. For FFI, expose a C-compatible boundary.
 
 ```rust
 #[repr(C)]
@@ -486,52 +430,38 @@ pub struct ApiResult {
 
 #[no_mangle]
 pub extern "C" fn client_create() -> ApiResult {
-    // C-compatible boundary only
+    // C-compatible boundary only.
 }
 ```
 
-**FFI rules:**
+FFI rules:
 
-- Use `extern "C"` and `#[repr(C)]` / `#[repr(transparent)]` for layout-sensitive types.
-- Do not expose Rust `String`, `Vec<T>`, `Result<T, E>`, trait objects, or panics across FFI.
-- Provide explicit create/free functions for ownership transfer.
-- Treat symbol names, struct layout, and allocation rules as frozen API.
-- Add ABI tests if consumers link dynamically.
+- Use `extern "C"` and `#[repr(C)]` or `#[repr(transparent)]` for layout-sensitive types.
+- Do not expose Rust `String`, `Vec<T>`, `Result<T, E>`, trait objects, references with Rust lifetimes, or panics across FFI.
+- Provide explicit create/free functions and document allocator ownership.
+- Treat symbol names, struct layout, enum discriminants, error codes, and allocation rules as frozen API.
+- Add ABI/link tests when consumers dynamically link.
 
----
+## Compatibility Testing
 
-## API Compatibility Testing
-
-### cargo-semver-checks
-
-Use semver checks in CI for published crates:
+Use tooling as a review gate, not as a substitute for judgment.
 
 ```bash
 cargo install cargo-semver-checks
 cargo semver-checks check-release
 ```
 
-### cargo-public-api
-
-Review public surface diffs:
-
 ```bash
 cargo install cargo-public-api
 cargo public-api > public-api.txt
 ```
-
-Check `public-api.txt` into the repo for API approval testing when the crate is stable.
-
-### Feature Matrix
 
 ```bash
 cargo install cargo-hack
 cargo hack check --feature-powerset --no-dev-deps
 ```
 
-### Wire Golden Tests
-
-Store representative payloads from previous versions:
+Store wire fixtures from previous versions:
 
 ```rust
 #[test]
@@ -543,106 +473,68 @@ fn reads_v1_heartbeat_payload() {
 }
 ```
 
-**Testing rules:**
+Testing rules:
 
-- Public API changes must be visible in review.
-- Wire format changes need old payload fixtures.
-- Feature combinations need CI coverage.
-- MSRV needs CI if promised.
+- Review a public API diff for stable crates.
+- Run semver checks before publishing.
+- Test feature combinations for shared crates.
+- Test MSRV when promised.
+- Keep old wire payload fixtures and new-write fixtures.
+- Include compile-fail or downstream-style tests for trait object safety, sealed traits, and expected construction patterns when those are part of the contract.
 
----
+## Review Checklist
 
-## Versioning Strategy
+Use this checklist for PRs that touch public APIs, wire formats, features, MSRV, or FFI:
 
-### SemVer for Rust Crates
+- [ ] No removed, renamed, hidden, or moved public items without a major-version plan.
+- [ ] No changed signatures, bounds, lifetimes, associated types, or return/error types without a new API and deprecation path.
+- [ ] No new required public struct fields, required trait methods, or exhaustive enum variants.
+- [ ] `#[non_exhaustive]` is used before release where future growth is expected.
+- [ ] Traits are sealed when downstream implementations should not exist.
+- [ ] New impls and blanket impls have been checked for coherence, inference, and downstream conflict risk.
+- [ ] Feature changes are additive, documented, and tested across relevant combinations.
+- [ ] MSRV changes are intentional, policy-compliant, tested, and in release notes.
+- [ ] Defaults, ordering, error semantics, retries, timeouts, and validation behavior remain compatible or have a migration plan.
+- [ ] Wire readers accept old payloads; new writes are staged for rolling upgrades.
+- [ ] FFI symbols, layouts, ownership, allocator rules, and panic behavior remain compatible.
+- [ ] Public API diff, semver check, changelog, and migration notes have been reviewed.
 
-| Version | Allowed Changes |
-|---|---|
-| **Patch** `1.2.x` | Bug fixes, docs, internal refactors, compatible behavior fixes |
-| **Minor** `1.x.0` | Additive APIs, deprecations, additive features, compatible MSRV bump if policy allows |
-| **Major** `x.0.0` | Breaking API removals, signature changes, exhaustive enum expansion, major behavior changes |
+## Common Anti-Patterns
 
-### Practical Rules
-
-1. **Patch releases must be boring.** Users should upgrade automatically.
-2. **Minor releases can add but not surprise.** Add APIs, do not flip defaults carelessly.
-3. **Major releases need migration guides.** A major version is not permission to be vague.
-4. **Deprecate before remove.** Warnings are a migration tool.
-5. **Document behavior, not just signatures.** Semantic changes break users too.
-
----
-
-## Pull Request Checklist
-
-When reviewing public API or wire changes:
-
-- [ ] No removed public items without major-version plan
-- [ ] No changed signatures without new API/deprecation path
-- [ ] No new required fields on public structs
-- [ ] No new required trait methods
-- [ ] No new variants on exhaustive public enums
-- [ ] `#[non_exhaustive]` used where future growth is expected
-- [ ] Traits sealed when users should not implement them
-- [ ] Feature changes are additive and tested
-- [ ] MSRV change is intentional and documented
-- [ ] Wire readers support old payloads
-- [ ] New wire writes are opt-in during rolling upgrade
-- [ ] Public API diff or semver check reviewed
-- [ ] Changelog and migration notes updated
-
----
-
-## Anti-Patterns
-
-### Public Struct Literals for Growing Config
+### Growing Public Config Structs
 
 ```rust
-// BAD: every new option is a breaking field addition.
 pub struct ClientConfig {
     pub endpoint: String,
     pub timeout: Duration,
 }
-
-// GOOD: private fields plus builder.
-pub struct ClientConfig {
-    endpoint: String,
-    timeout: Duration,
-}
 ```
 
-### Exhaustive Error Enum That Will Grow
+Prefer private fields plus a builder for configuration expected to grow.
+
+### Exhaustive Error Kinds
 
 ```rust
-// BAD: adding RateLimited later breaks downstream matches.
-pub enum ClientErrorKind {
-    Timeout,
-    Unauthorized,
-}
-
-// GOOD: non_exhaustive if this is public and likely to grow.
-#[non_exhaustive]
 pub enum ClientErrorKind {
     Timeout,
     Unauthorized,
 }
 ```
 
-### Required Trait Method Added Later
+Use `#[non_exhaustive]` if new error kinds are plausible.
+
+### Required Trait Methods Added Later
 
 ```rust
-// BAD: breaks every downstream impl.
 pub trait Store {
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>, Error>;
     fn delete(&self, key: &str) -> Result<(), Error>;
 }
-
-// GOOD: default method or new extension trait.
-pub trait StoreDeleteExt: Store {
-    fn delete(&self, key: &str) -> Result<(), Error>;
-}
 ```
 
-### Rust Type Names in Wire Format
+Use a default method when universally correct, or add a separate extension trait.
+
+### Rust Type Names in Wire Formats
 
 ```json
 {
@@ -651,7 +543,7 @@ pub trait StoreDeleteExt: Store {
 }
 ```
 
-Use stable protocol names instead:
+Use stable protocol names:
 
 ```json
 {
@@ -660,19 +552,11 @@ Use stable protocol names instead:
 }
 ```
 
-### Behavior Break Disguised as Cleanup
+### Behavior Breaks Presented as Cleanup
 
-```rust
-// BAD: changed default timeout from 30s to 5s in a patch release.
-ClientOptions::new()
+Changing `ClientOptions::new()` from a 30 second timeout to a 5 second timeout is a behavior break. Add an explicit mode such as `ClientOptions::new().with_fast_fail_defaults()` instead.
 
-// GOOD: add a new explicit mode.
-ClientOptions::new().with_fast_fail_defaults()
-```
-
----
-
-## Resources
+## References
 
 - Rust API Guidelines: https://rust-lang.github.io/api-guidelines/
 - Cargo SemVer Compatibility: https://doc.rust-lang.org/cargo/reference/semver.html
