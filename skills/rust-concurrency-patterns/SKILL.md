@@ -1,6 +1,6 @@
 ---
 name: rust-concurrency-patterns
-description: Choose the right Rust concurrency abstraction: ordinary async/await for I/O, bounded channels for producer/consumer, Rayon for CPU parallelism, locks only for short critical sections, and actors/tasks for isolated state machines. Avoid Arc<Mutex<T>> business logic and unbounded queues by default.
+description: "Choose the right Rust concurrency abstraction: ordinary async/await for I/O, bounded channels for producer/consumer, Rayon for CPU parallelism, locks only for short critical sections, and actors/tasks for isolated state machines. Avoid Arc<Mutex<T>> business logic and unbounded queues by default."
 invocable: false
 ---
 

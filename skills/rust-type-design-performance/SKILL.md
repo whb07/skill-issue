@@ -1,6 +1,6 @@
 ---
 name: rust-type-design-performance
-description: Design Rust types for performance: private fields and sealed traits by default, small Copy newtypes, slices over owned containers, iterators over intermediate Vecs, generics for hot paths, trait objects at boundaries, and measured allocation control. Use unsafe only with proof.
+description: "Design Rust types for performance: private fields and sealed traits by default, small Copy newtypes, slices over owned containers, iterators over intermediate Vecs, generics for hot paths, trait objects at boundaries, and measured allocation control. Use unsafe only with proof."
 invocable: false
 ---
 
