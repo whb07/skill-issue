@@ -1,0 +1,4 @@
+interface:
+  display_name: "F# Concurrency Patterns"
+  short_description: "Choose F# async and parallel designs"
+  default_prompt: "Use $fsharp-concurrency-patterns to choose an F# concurrency design for this workflow."

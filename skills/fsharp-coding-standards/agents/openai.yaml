@@ -1,0 +1,4 @@
+interface:
+  display_name: "F# Coding Standards"
+  short_description: "Write idiomatic modern F# code"
+  default_prompt: "Use $fsharp-coding-standards to refactor this F# code toward idiomatic domain-first style."

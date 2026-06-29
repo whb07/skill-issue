@@ -1,0 +1,4 @@
+interface:
+  display_name: "F# Type Design Performance"
+  short_description: "Design efficient F# types and APIs"
+  default_prompt: "Use $fsharp-type-design-performance to review these F# types for allocation and API performance."

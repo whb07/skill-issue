@@ -1,0 +1,4 @@
+interface:
+  display_name: "F# API Design"
+  short_description: "Design stable F# and .NET APIs"
+  default_prompt: "Use $fsharp-api-design to review this F# public API for compatibility risks."
