@@ -2,17 +2,31 @@
 
 Use this reference when building scripts around Cursor's `agent` command. Check `agent --help` before relying on flags not listed here because the installed CLI may differ from the documented version.
 
+## Model selection
+
+Default to Cursor Grok 4.5 by passing its exact CLI ID on every run:
+
+```bash
+agent -p --model cursor-grok-4.5-high --mode ask \
+  "Analyze this codebase"
+```
+
+Do not rely on Cursor's configured default, which may be `auto`. Override `cursor-grok-4.5-high` only when the user explicitly names another model. Use `agent --list-models` to resolve and verify model IDs; do not silently substitute another model if the default or requested ID is unavailable.
+
 ## Print mode and file changes
 
 `-p` and `--print` run non-interactively. Documentation for some versions describes file edits as unapplied unless `--force` (or its `--yolo` alias) is present. Current CLI help also says print mode has access to write and shell tools, so use an explicit read-only mode rather than relying on the absence of `--force`.
 
 ```bash
 # Read-only Q&A or planning on versions that support these modes
-agent -p --mode ask "What does this codebase do?"
-agent -p --plan "Propose a refactor without changing files"
+agent -p --model cursor-grok-4.5-high --mode ask \
+  "What does this codebase do?"
+agent -p --model cursor-grok-4.5-high --plan \
+  "Propose a refactor without changing files"
 
 # Apply file changes without interactive confirmation
-agent -p --force "Refactor this code to use modern ES6+ syntax"
+agent -p --model cursor-grok-4.5-high --force \
+  "Refactor this code to use modern ES6+ syntax"
 ```
 
 Use `--force` only for authorized modifications. It force-allows commands unless explicitly denied, which is broader than permission to write one file. Writing a requested report to disk counts as a modification.
@@ -20,9 +34,11 @@ Use `--force` only for authorized modifications. It force-allows commands unless
 Useful scoping and isolation options in current versions include:
 
 ```bash
-agent -p --workspace /path/to/repository --mode ask "Explain this project"
+agent -p --model cursor-grok-4.5-high \
+  --workspace /path/to/repository --mode ask "Explain this project"
 
-agent -p --workspace /path/to/repository --worktree \
+agent -p --model cursor-grok-4.5-high \
+  --workspace /path/to/repository --worktree \
   --force "Implement the requested change and run focused tests"
 ```
 
@@ -35,13 +51,14 @@ Check `agent --help` before using `--mode`, `--workspace`, or `--worktree` in po
 Text is the default for `--print` and emits the clean final response:
 
 ```bash
-agent -p --mode ask --output-format text "Review the recent changes"
+agent -p --model cursor-grok-4.5-high --mode ask \
+  --output-format text "Review the recent changes"
 ```
 
 Use shell redirection when the caller, rather than Cursor Agent, should own the output file:
 
 ```bash
-agent -p --mode ask --output-format text \
+agent -p --model cursor-grok-4.5-high --mode ask --output-format text \
   "Summarize this repository" > repository-summary.txt
 ```
 
@@ -52,7 +69,7 @@ Redirection does not require `--force` because the shell writes the file, not Cu
 Use JSON for a completed response that another program will consume:
 
 ```bash
-agent -p --mode ask --output-format json \
+agent -p --model cursor-grok-4.5-high --mode ask --output-format json \
   "Analyze ./screenshots/ui.png in detail" | jq -r '.result'
 ```
 
@@ -63,7 +80,7 @@ Check the actual output schema before building durable automation around fields 
 Use newline-delimited `stream-json` for progress events:
 
 ```bash
-agent -p --force --output-format stream-json \
+agent -p --model cursor-grok-4.5-high --force --output-format stream-json \
   "Analyze the project and write analysis.txt"
 ```
 
@@ -77,7 +94,8 @@ Add `--stream-partial-output` to receive incremental assistant text. Common even
 Parse defensively:
 
 ```bash
-agent -p --mode ask --output-format stream-json --stream-partial-output \
+agent -p --model cursor-grok-4.5-high --mode ask \
+  --output-format stream-json --stream-partial-output \
   "Analyze this project" |
 while IFS= read -r line; do
   type=$(jq -r '.type // empty' <<<"$line")
@@ -107,7 +125,7 @@ Process files safely even when paths contain whitespace:
 ```bash
 find src -type f -name '*.js' -print0 |
 while IFS= read -r -d '' file; do
-  agent -p --force \
+  agent -p --model cursor-grok-4.5-high --force \
     "Add comprehensive JSDoc comments to the JavaScript file at: $file"
 done
 ```
@@ -119,19 +137,20 @@ Before choosing this pattern, consider whether one repository-level prompt would
 Reference accessible relative or absolute paths in the prompt. Cursor Agent reads them through its tools:
 
 ```bash
-agent -p --mode ask "Describe this image: ./screenshot.png"
+agent -p --model cursor-grok-4.5-high --mode ask \
+  "Describe this image: ./screenshot.png"
 
-agent -p --mode ask \
+agent -p --model cursor-grok-4.5-high --mode ask \
   "Compare these images and identify differences: ./before.png ./after.png"
 
-agent -p --plan \
+agent -p --model cursor-grok-4.5-high --plan \
   "Review src/app.ts and designs/homepage.png. Suggest changes that align the implementation with the mockup."
 ```
 
 Verify each path exists relative to the process working directory. Use JSON when downstream code needs to extract the description:
 
 ```bash
-agent -p --mode ask --output-format json \
+agent -p --model cursor-grok-4.5-high --mode ask --output-format json \
   "Analyze this image in detail: ./screenshots/ui-mockup.png" |
   jq -r '.result'
 ```
