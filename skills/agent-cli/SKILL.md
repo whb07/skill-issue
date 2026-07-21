@@ -1,6 +1,6 @@
 ---
 name: agent-cli
-description: Use Cursor's `agent` CLI as a headless agentic coding harness for non-interactive code analysis, generation, review, refactoring, and media-aware tasks. Use when Codex needs to invoke Cursor Agent from a shell or automation workflow, choose text/JSON/streaming output, control file edits, pass repository files or images in prompts, monitor a run, or verify changes produced by `agent -p`. Default runs to Grok 4.5 unless the user explicitly selects another model.
+description: Use Cursor's `agent` CLI as a headless agentic coding harness for non-interactive code analysis, generation, review, refactoring, and media-aware tasks. Use when Codex needs to invoke Cursor Agent from a shell or automation workflow, choose text/JSON/streaming output, control file edits, pass repository files or images in prompts, monitor a run, or verify changes produced by `agent -p`. Default runs to Grok 4.5 Fast unless the user explicitly selects another model.
 ---
 
 # Cursor Agent CLI
@@ -19,23 +19,23 @@ Run Cursor Agent non-interactively with deliberate permissions, a bounded prompt
 
 ## Choose the model
 
-- Pass `--model cursor-grok-4.5-high` on every invocation by default. This is the CLI model ID whose display name is **Cursor Grok 4.5**.
+- Pass `--model cursor-grok-4.5-high-fast` on every invocation by default. This is the CLI model ID whose display name is **Cursor Grok 4.5 Fast**.
 - Use a different model only when the user explicitly requests one. Pass the exact requested model ID rather than guessing from its display name.
-- Run `agent --list-models` to verify available IDs when the requested or default model is rejected. If `cursor-grok-4.5-high` is unavailable and the user did not specify an alternative, report the problem instead of silently falling back to `auto` or another model.
+- Run `agent --list-models` to verify available IDs when the requested or default model is rejected. If `cursor-grok-4.5-high-fast` is unavailable and the user did not specify an alternative, report the problem instead of silently falling back to `auto` or another model.
 
 ## Choose permissions
 
-- Use `agent -p --model cursor-grok-4.5-high --mode ask "..."` for read-only questions and explanations. Use `agent -p --model cursor-grok-4.5-high --plan "..."` for read-only analysis and implementation plans when those modes are supported by the installed version.
+- Use `agent -p --model cursor-grok-4.5-high-fast --mode ask "..."` for read-only questions and explanations. Use `agent -p --model cursor-grok-4.5-high-fast --plan "..."` for read-only analysis and implementation plans when those modes are supported by the installed version.
 - Do not assume plain `agent -p` is read-only. Current versions expose write and shell tools in print mode; omitting `--force` means those tool calls are not force-approved, not necessarily that the tools are unavailable.
 - Add `--force` only when the user asked to modify files or the authorized workflow requires an output file. It force-allows commands unless explicitly denied, so treat it as broader than a file-edit switch. Treat `--yolo` as an alias, but prefer the clearer `--force` spelling.
 - Keep the prompt and working directory narrowly scoped. Do not use `--force` merely because the prompt asks for analysis.
 - Do not install Cursor CLI, change login state, or send secrets to Cursor.
 
 ```bash
-agent -p --model cursor-grok-4.5-high --mode ask \
+agent -p --model cursor-grok-4.5-high-fast --mode ask \
   "Explain the request flow through src/server.ts"
 
-agent -p --model cursor-grok-4.5-high --force \
+agent -p --model cursor-grok-4.5-high-fast --force \
   "Refactor src/parser.ts to remove duplicate parsing logic. Preserve its public API and run the focused tests."
 ```
 
