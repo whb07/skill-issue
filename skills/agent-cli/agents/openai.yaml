@@ -1,0 +1,4 @@
+interface:
+  display_name: "Cursor Agent CLI"
+  short_description: "Run Cursor Agent safely from scripts"
+  default_prompt: "Use $agent-cli to run Cursor Agent headlessly for this task."
