@@ -143,7 +143,7 @@ muse exec --worktree existing --worktree-existing /path/to/worktree \
   --trust-workspace --yolo "Continue the refactor in the existing worktree"
 ```
 
-- Additional `muse exec` controls: `--max-model-steps <N>`, `--max-tool-output-bytes <N>`, `--session-id <UUID>` (pin or resume), `--allow-workspace-switch`, `--context-compaction-*`, `--no-foreign-personal-context`, `--disable-web-tools`. Check `muse exec --help` before using them in portable automation.
+- Additional `muse exec` controls: `--max-model-steps <N>`, `--max-tool-output-bytes <N>`, `--session-id <UUID>` (pin or resume), `--allow-workspace-switch`, `--context-compaction-*`, `--no-foreign-personal-context`, `--disable-web-tools`. Check `muse exec --help` before using them in portable automation. **Do not use `--max-model-steps`; let the run continue until completion.**
 - For batch processing, prefer handling whitespace safely:
 
 ```bash
