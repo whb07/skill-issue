@@ -1,0 +1,9 @@
+schema_version: "1.1"
+name: clean-refactor-no-findings
+expected_outcome: |
+  Recognizes that extracting normalize_email preserves behavior and reports no
+  defects introduced by the change, with a coverage note. Any pre-existing
+  issue it mentions is labeled as pre-existing and is not presented as caused
+  by the refactor.
+context:
+  scaffold_script: place-files.sh
