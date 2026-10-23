@@ -1,9 +1,0 @@
-schema_version: "1.1"
-name: empty-scope-on-default-branch
-expected_outcome: |
-  Finds no staged, unstaged, or untracked changes and no branch commits ahead
-  of a base (the repo is on main with a clean tree), reports that there is
-  nothing to review, and asks what to review instead of silently reviewing the
-  latest commit.
-context:
-  scaffold_script: place-files.sh

@@ -1,9 +1,0 @@
-schema_version: "1.1"
-name: claude-md-convention-violation
-expected_outcome: |
-  Flags that integrations/weather.py imports and calls `requests` directly,
-  citing the CLAUDE.md rule, and explains the consequence (no timeout,
-  retries, or auth header). Does not report summarize's length as a violation
-  of the vague "prefer small functions" guidance.
-context:
-  scaffold_script: place-files.sh

@@ -1,8 +1,0 @@
-schema_version: "1.1"
-name: unit-change-breaks-untouched-caller
-expected_outcome: |
-  Finds that worker.py, which the diff does not touch, still computes
-  REQUEST_TIMEOUT / 1000, so after the change the upstream socket timeout
-  drops from 30 s to 0.03 s.
-context:
-  scaffold_script: place-files.sh

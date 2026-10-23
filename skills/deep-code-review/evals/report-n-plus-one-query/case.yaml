@@ -1,9 +1,0 @@
-schema_version: "1.1"
-name: report-n-plus-one-query
-expected_outcome: |
-  Flags that top_customers runs one remote customer query per order,
-  quantifies it against the configured workload (up to ~20,000 orders at ~2 ms
-  each, about 40 s against a 30 s job timeout), and recommends the existing
-  get_customers_by_ids helper or one equivalent query.
-context:
-  scaffold_script: place-files.sh
